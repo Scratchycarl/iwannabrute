@@ -331,7 +331,7 @@ pwn_device() {
         echo "Using ipwndu for pwning..."
         ipwndfu pwn
         ;;
-    ipwnder)
+    ipwnder|ipwnder32)
         echo "Using ipwnder for pwning..."
         ipwnder
         ;;
