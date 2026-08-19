@@ -22,30 +22,48 @@ mk_bruteforce_ramdisk() {
         } &> /dev/null
         iOS_Vers=`echo $version | awk -F. '{print $1}'`
 
-        {
-        ## Define RootFS name
-
-        RootFS="$((curl "https://www.theiphonewiki.com/wiki/Firmware_Keys/$iOS_Vers.x") | grep "$BuildID"_"" |  grep $device -m 1| awk -F_ '{print $1}' | awk -F"wiki" '{print "wiki"$2}')"
-        } &> /dev/null 
-
         mkdir -p ramdisks/bruteforce-$device-$version/work
 
         cd ramdisks/bruteforce-$device-$version/work
 
         echo "$script_version" > ../version
 
-        ## Get wiki keys page
+        ## Get firmware keys from The Apple Wiki's MediaWiki API
 
         echo Downloading firmware keys...
 
-        curl "https://www.theiphonewiki.com/$RootFS"_"$BuildID"_"($device)" -o temp_keys.html &> /dev/null
+        key_page=$(
+            curl -fsSG "https://theapplewiki.com/api.php" \
+                --data-urlencode "action=query" \
+                --data-urlencode "list=search" \
+                --data-urlencode "srsearch=\"$BuildID\" \"$device\"" \
+                --data-urlencode "srnamespace=2304" \
+                --data-urlencode "format=json" \
+                --data-urlencode "formatversion=2" |
+                ../../../bin/Darwin/jq -r '.query.search[0].title // empty'
+        )
 
-        if [ -e "temp_keys.html" ]; then
-        echo Done!
-        else
-        echo Failed to download firmware keys
-        exit 1
+        if [[ -z "$key_page" ]]; then
+            echo "Failed to find firmware keys for $device $version ($BuildID)."
+            exit 1
         fi
+
+        curl -fsSG "https://theapplewiki.com/api.php" \
+            --data-urlencode "action=query" \
+            --data-urlencode "prop=revisions" \
+            --data-urlencode "rvprop=content" \
+            --data-urlencode "rvslots=main" \
+            --data-urlencode "titles=$key_page" \
+            --data-urlencode "format=json" \
+            --data-urlencode "formatversion=2" |
+            ../../../bin/Darwin/jq -r '.query.pages[0].revisions[0].slots.main.content // empty' \
+            > temp_keys.txt
+
+        if [[ ! -s "temp_keys.txt" ]]; then
+            echo "Failed to download firmware keys for $device $version ($BuildID)."
+            exit 1
+        fi
+        echo Done!
         ../../../bin/Darwin/partialZipBrowser -g BuildManifest.plist $ipsw_link &> /dev/null
 
         images="iBSS.iBEC.applelogo.DeviceTree.kernelcache.RestoreRamDisk"
@@ -54,8 +72,23 @@ mk_bruteforce_ramdisk() {
             temp_type="$((echo $images) | awk -v var=$i -F. '{print $var}' | awk '{print tolower($0)}')"
             temp_type2="$((echo $images) | awk -v var=$i -F. '{print $var}')"
 
-        eval "$temp_type"_iv="$((cat temp_keys.html) | grep "$temp_type-iv" | awk -F"</code>" '{print $1}' | awk -F"-iv\"\>" '{print $2}')"
-        eval "$temp_type"_key="$((cat temp_keys.html) | grep "$temp_type-key" | awk -F"</code>" '{print $1}' | awk -F"$temp_type-key\"\>" '{print $2}')"
+        case "$temp_type2" in
+            applelogo) key_field="AppleLogo" ;;
+            kernelcache) key_field="Kernelcache" ;;
+            RestoreRamDisk) key_field="RestoreRamdisk" ;;
+            *) key_field="$temp_type2" ;;
+        esac
+
+        component_iv=$(sed -n "s/^[[:space:]]*|[[:space:]]*${key_field}IV[[:space:]]*=[[:space:]]*//p" temp_keys.txt | xargs)
+        component_key=$(sed -n "s/^[[:space:]]*|[[:space:]]*${key_field}Key[[:space:]]*=[[:space:]]*//p" temp_keys.txt | xargs)
+
+        if [[ ! "$component_iv" =~ ^[[:xdigit:]]{32}$ || ! "$component_key" =~ ^[[:xdigit:]]{64}$ ]]; then
+            echo "Missing or invalid $temp_type2 firmware keys for $device $version ($BuildID)."
+            exit 1
+        fi
+
+        eval "$temp_type"_iv="$component_iv"
+        eval "$temp_type"_key="$component_key"
         iv=$temp_type"_iv"
         key=$temp_type"_key"
 
