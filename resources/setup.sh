@@ -28,6 +28,12 @@ fail_phase() {
     exit "$2"
 }
 
+delay_seconds() {
+    # The minimal A4 restore ramdisk has no sleep executable. Bash's timed read
+    # provides a low-overhead delay without writing a temporary file.
+    read -r -t "$1" _ < /dev/console || true
+}
+
 wait_for_data_device() {
     local attempt
     for ((attempt=1; attempt<=60; attempt++)); do
@@ -35,24 +41,45 @@ wait_for_data_device() {
             echo "Data partition device appeared after $attempt second(s)." > /dev/console
             return 0
         fi
-        sleep 1
+        delay_seconds 1
     done
     echo "Timed out waiting for an A4 data partition device." > /dev/console
     return 1
 }
 
 mount_and_verify_data() {
-    local attempt
+    local attempt data_device mounts
     for attempt in 1 2 3; do
-        echo "Mounting data partition (attempt $attempt/3)..." > /dev/console
-        /bin/mount.sh >> /dev/console 2>&1
-        if [[ -s /mnt2/keybags/systembag ]]; then
-            echo "Verified /mnt2/keybags/systembag." > /dev/console
+        mounts="$(mount)"
+
+        if [[ "$mounts" != *" on /mnt1 "* && -b /dev/disk0s1s1 ]]; then
+            echo "Mounting system partition on /mnt1..." > /dev/console
+            mount_hfs /dev/disk0s1s1 /mnt1 >> /dev/console 2>&1
+        fi
+
+        mounts="$(mount)"
+        if [[ "$mounts" != *" on /mnt2 "* ]]; then
+            if [[ -b /dev/disk0s1s2 ]]; then
+                data_device="/dev/disk0s1s2"
+            else
+                data_device="/dev/disk0s2s1"
+            fi
+            echo "Mounting $data_device on /mnt2 (attempt $attempt/3)..." > /dev/console
+            mount_hfs "$data_device" /mnt2 >> /dev/console 2>&1
+        fi
+
+        if [[ -s /mnt2/keybags/systembag.kb ]]; then
+            echo "Verified /mnt2/keybags/systembag.kb." > /dev/console
             return 0
         fi
-        echo "Data mount did not expose /mnt2/keybags/systembag." > /dev/console
+        echo "Data mount did not expose /mnt2/keybags/systembag.kb." > /dev/console
         mount > /dev/console 2>&1
-        sleep 3
+        if [[ -d /mnt2/keybags ]]; then
+            /bin/ls -la /mnt2/keybags > /dev/console 2>&1
+        else
+            /bin/ls -la /mnt2 > /dev/console 2>&1
+        fi
+        delay_seconds 3
     done
     return 1
 }
@@ -77,7 +104,7 @@ run_phase SET_AUTOBOOT nvram auto-boot=1 ||
 emit_phase START_RESTORED START
 /usr/local/bin/restored_external.sshrd >> /dev/console 2>&1 &
 restored_pid=$!
-sleep 2
+delay_seconds 2
 if kill -0 "$restored_pid" 2>/dev/null; then
     emit_phase START_RESTORED RUNNING 0
     emit_phase START_SSHD MANAGED_BY_RESTORED 0
