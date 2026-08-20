@@ -1,7 +1,7 @@
 #!/bin/bash
 
 script_version="2.0"
-ramdisk_cache_version="2.0-a4.2"
+ramdisk_cache_version="2.0-a4.3"
 
 die() {
     echo "[ERROR] $*" >&2

@@ -43,11 +43,21 @@ fi
 run_phase SET_AUTOBOOT nvram auto-boot=1 ||
     fail_phase SET_AUTOBOOT "$?"
 
-run_phase START_SSHD /sbin/sshd ||
-    fail_phase START_SSHD "$?"
-
-run_phase START_RESTORED /usr/local/bin/restored_external.sshrd ||
-    fail_phase START_RESTORED "$?"
+# restored_external initializes USB mux and runs sshd in inetd mode. Starting a
+# standalone sshd first occupies port 22 and makes restored_external exit.
+emit_phase START_RESTORED START
+/usr/local/bin/restored_external.sshrd >> /dev/console 2>&1 &
+restored_pid=$!
+sleep 2
+if kill -0 "$restored_pid" 2>/dev/null; then
+    emit_phase START_RESTORED RUNNING 0
+    emit_phase START_SSHD MANAGED_BY_RESTORED 0
+else
+    wait "$restored_pid"
+    restored_status=$?
+    emit_phase START_RESTORED EXIT "$restored_status"
+    fail_phase START_RESTORED "$restored_status"
+fi
 
 run_phase MOUNT_DATA /bin/mount.sh ||
     fail_phase MOUNT_DATA "$?"
