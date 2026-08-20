@@ -28,6 +28,35 @@ fail_phase() {
     exit "$2"
 }
 
+wait_for_data_device() {
+    local attempt
+    for ((attempt=1; attempt<=60; attempt++)); do
+        if [[ -b /dev/disk0s1s2 || -b /dev/disk0s2s1 ]]; then
+            echo "Data partition device appeared after $attempt second(s)." > /dev/console
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for an A4 data partition device." > /dev/console
+    return 1
+}
+
+mount_and_verify_data() {
+    local attempt
+    for attempt in 1 2 3; do
+        echo "Mounting data partition (attempt $attempt/3)..." > /dev/console
+        /bin/mount.sh >> /dev/console 2>&1
+        if [[ -s /mnt2/keybags/systembag ]]; then
+            echo "Verified /mnt2/keybags/systembag." > /dev/console
+            return 0
+        fi
+        echo "Data mount did not expose /mnt2/keybags/systembag." > /dev/console
+        mount > /dev/console 2>&1
+        sleep 3
+    done
+    return 1
+}
+
 echo "32-bit Bruteforce SSH Ramdisk by meowcat454, AJAIZ and platinumstuff" > /dev/console
 echo "--------------------------------" > /dev/console
 emit_phase SETUP START
@@ -59,7 +88,10 @@ else
     fail_phase START_RESTORED "$restored_status"
 fi
 
-run_phase MOUNT_DATA /bin/mount.sh ||
+run_phase WAIT_DATA_DEVICE wait_for_data_device ||
+    fail_phase WAIT_DATA_DEVICE "$?"
+
+run_phase MOUNT_DATA mount_and_verify_data ||
     fail_phase MOUNT_DATA "$?"
 
 if [[ -d /mnt1/private/etc ]]; then
