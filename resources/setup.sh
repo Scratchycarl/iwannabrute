@@ -1,5 +1,5 @@
 #!/bin/bash
-phase_log="/iwannabrute-phases.log"
+phase_log=""
 
 emit_phase() {
     local phase="$1"
@@ -7,7 +7,9 @@ emit_phase() {
     local status="${3:--}"
     local message="[IWANNABRUTE] PHASE=$phase STATE=$state EXIT=$status"
     echo "$message" > /dev/console
-    echo "$message" >> "$phase_log"
+    if [[ -n "$phase_log" ]]; then
+        echo "$message" >> "$phase_log"
+    fi
 }
 
 run_phase() {
@@ -30,8 +32,13 @@ echo "32-bit Bruteforce SSH Ramdisk by meowcat454, AJAIZ and platinumstuff" > /d
 echo "--------------------------------" > /dev/console
 emit_phase SETUP START
 
-run_phase MOUNT_ROOTFS mount -o rw,union,update / ||
-    fail_phase MOUNT_ROOTFS "$?"
+run_phase MOUNT_ROOTFS mount -o rw,union,update /
+root_mount_status=$?
+if [[ "$root_mount_status" -ne 0 ]]; then
+    # A4 restore ramdisks can remain read-only while the data partitions,
+    # SSH daemon, and bruteforce payload still work.
+    emit_phase MOUNT_ROOTFS NONFATAL "$root_mount_status"
+fi
 
 run_phase SET_AUTOBOOT nvram auto-boot=1 ||
     fail_phase SET_AUTOBOOT "$?"
@@ -47,7 +54,7 @@ run_phase MOUNT_DATA /bin/mount.sh ||
 
 if [[ -d /mnt1/private/etc ]]; then
     persistent_phase_log="/mnt1/private/etc/iwannabrute-phases.log"
-    cp "$phase_log" "$persistent_phase_log"
+    : > "$persistent_phase_log"
     persist_status=$?
     if [[ "$persist_status" -eq 0 ]]; then
         phase_log="$persistent_phase_log"
