@@ -14,7 +14,7 @@ iwannabrute needs initial setup before usage.
  - MacPorts: `sudo port install bash curl libusb`
  - For macOS 12.7.6 and lower, use MacPorts, not Homebrew.
  
-1. Clone and cd into this repository: `git clone https://github.com/platinumstufff/iwannabrute --recursive && cd iwannabrute`
+1. Clone and cd into this repository: `git clone https://github.com/Scratchycarl/iwannabrute --recursive && cd iwannabrute`
 2. Place your device into DFU mode
 3. Run `./start.sh`
 
