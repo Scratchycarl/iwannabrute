@@ -5,23 +5,8 @@ Bruteforce A4-A6 numeric password with ease.
 
 # Prerequisites
 
-1. A computer running macOS.
+1. An Intel computer running macOS.
 2. A compatible device (see below).
-3. A4 devices also need an **Intel Mac** (`x86_64`). iPad 1 ramdisk builds need Xcode Command Line Tools (`clang++`).
-
-# Compatible devices
-
-## A4 (verified)
-
-| Device | Identifier | iOS |
-| ------------ | ------------ | ------------ |
-| iPhone 4 (GSM, Rev A) | iPhone3,2 | 7.1.2 |
-| iPod touch 4 | iPod4,1 | 6.1.6 |
-| iPad 1 | iPad1,1 | 5.1.1 |
-
-## A5–A6
-
-iPhone 4S, iPhone 5, iPhone 5C, iPad 2, iPad 3, iPad 4, iPad mini 1, and iPod touch 5. Default ramdisk version is 9.0.2.
 
 # Usage
 iwannabrute needs initial setup before usage.
