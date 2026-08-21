@@ -3,10 +3,23 @@
 Bruteforce A4-A6 numeric password with ease.
 </p>
 
-# Prerequsites
+# Prerequisites
 
 1. A computer running macOS.
-2. A compatible device (A5-A6)
+2. A compatible device (see below).
+3. A4 devices also need an **Intel Mac** (`x86_64`). iPad 1 ramdisk builds need Xcode Command Line Tools (`clang++`).
+
+# Compatible devices
+
+Physically verified A4 pairs:
+
+| Device | Identifier | iOS |
+| ------------ | ------------ | ------------ |
+| iPhone 4 (GSM, Rev A) | iPhone3,2 | 7.1.2 |
+| iPod touch 4 | iPod4,1 | 6.1.6 |
+| iPad 1 | iPad1,1 | 5.1.1 |
+
+A5–A6 devices continue to use the original ramdisk path.
 
 # Usage
 iwannabrute needs initial setup before usage.
@@ -29,6 +42,8 @@ iwannabrute needs initial setup before usage.
 8-digit |92 days |35 days
 
 The tool will use the AES engine as much as possible with no restrictions at the full speed. 80 milliseconds is a value that Apple uses to calibrate it's software to this day.
+
+iPad 1 on iOS 5.1.1 currently uses userland (“manual”) derivation against the UID AES engine. That is still hardware AES, but each guess pays extra syscall overhead, so 4-digit codes can take longer than the 13-minute 80 ms/p figure.
 
 
 # Soon™
