@@ -34,38 +34,51 @@ delay_seconds() {
     read -r -t "$1" _ < /dev/console || true
 }
 
+first_block_device() {
+    local candidate
+    for candidate in "$@"; do
+        if [[ -b "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 wait_for_data_device() {
     local attempt
     for ((attempt=1; attempt<=60; attempt++)); do
-        if [[ -b /dev/disk0s1s2 || -b /dev/disk0s2s1 ]]; then
+        if first_block_device /dev/disk0s1s2 /dev/disk0s2s1 /dev/disk0s2 >/dev/null; then
             echo "Data partition device appeared after $attempt second(s)." > /dev/console
             return 0
         fi
         delay_seconds 1
     done
     echo "Timed out waiting for an A4 data partition device." > /dev/console
+    ls -l /dev/disk* > /dev/console 2>&1
     return 1
 }
 
 mount_and_verify_data() {
-    local attempt data_device mounts
+    local attempt data_device mounts system_device
     for attempt in 1 2 3; do
         mounts="$(mount)"
+        system_device="$(first_block_device /dev/disk0s1s1 /dev/disk0s1 || true)"
 
-        if [[ "$mounts" != *" on /mnt1 "* && -b /dev/disk0s1s1 ]]; then
-            echo "Mounting system partition on /mnt1..." > /dev/console
-            mount_hfs /dev/disk0s1s1 /mnt1 >> /dev/console 2>&1
+        if [[ "$mounts" != *" on /mnt1 "* && -n "$system_device" ]]; then
+            echo "Mounting $system_device on /mnt1..." > /dev/console
+            mount_hfs "$system_device" /mnt1 >> /dev/console 2>&1
         fi
 
         mounts="$(mount)"
         if [[ "$mounts" != *" on /mnt2 "* ]]; then
-            if [[ -b /dev/disk0s1s2 ]]; then
-                data_device="/dev/disk0s1s2"
+            data_device="$(first_block_device /dev/disk0s1s2 /dev/disk0s2s1 /dev/disk0s2 || true)"
+            if [[ -z "$data_device" ]]; then
+                echo "No data partition device is present yet." > /dev/console
             else
-                data_device="/dev/disk0s2s1"
+                echo "Mounting $data_device on /mnt2 (attempt $attempt/3)..." > /dev/console
+                mount_hfs "$data_device" /mnt2 >> /dev/console 2>&1
             fi
-            echo "Mounting $data_device on /mnt2 (attempt $attempt/3)..." > /dev/console
-            mount_hfs "$data_device" /mnt2 >> /dev/console 2>&1
         fi
 
         if [[ -s /mnt2/keybags/systembag.kb ]]; then
@@ -86,14 +99,28 @@ mount_and_verify_data() {
 
 echo "32-bit Bruteforce SSH Ramdisk by meowcat454, AJAIZ and platinumstuff" > /dev/console
 echo "--------------------------------" > /dev/console
+device_profile=""
+if [[ -f /iwannabrute.profile ]]; then
+    read -r device_profile < /iwannabrute.profile
+    echo "Ramdisk profile: $device_profile" > /dev/console
+fi
+uname -a > /dev/console 2>&1
+ls -l /dev/disk* > /dev/console 2>&1
 emit_phase SETUP START
 
-run_phase MOUNT_ROOTFS mount -o rw,union,update /
-root_mount_status=$?
-if [[ "$root_mount_status" -ne 0 ]]; then
-    # A4 restore ramdisks can remain read-only while the data partitions,
-    # SSH daemon, and bruteforce payload still work.
-    emit_phase MOUNT_ROOTFS NONFATAL "$root_mount_status"
+if [[ "$device_profile" == "iPad1,1" ]]; then
+    # iOS 5 panics in GetMasterBlock while remounting the ramdisk root.
+    # iPhone/iPod A4 kernels return EPERM here and can keep going.
+    echo "Skipping rw,union remount of / on iPad1,1." > /dev/console
+    emit_phase MOUNT_ROOTFS SKIPPED 0
+else
+    run_phase MOUNT_ROOTFS mount -o rw,union,update /
+    root_mount_status=$?
+    if [[ "$root_mount_status" -ne 0 ]]; then
+        # A4 restore ramdisks can remain read-only while the data partitions,
+        # SSH daemon, and bruteforce payload still work.
+        emit_phase MOUNT_ROOTFS NONFATAL "$root_mount_status"
+    fi
 fi
 
 run_phase SET_AUTOBOOT nvram auto-boot=1 ||
