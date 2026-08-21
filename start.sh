@@ -27,6 +27,9 @@ cleanup_build_mount() {
         sudo hdiutil detach "$active_mountpoint" >/dev/null 2>&1 || true
         active_mountpoint=""
     fi
+    if [[ -n "$temporary_aespatcher" && -f "$temporary_aespatcher" ]]; then
+        rm -f "$temporary_aespatcher"
+    fi
 }
 
 init_diagnostic_log() {
@@ -38,13 +41,28 @@ init_diagnostic_log() {
     echo "[INFO] Started: $(date '+%Y-%m-%d %H:%M:%S %z')"
 }
 
+build_ios5_aespatcher() {
+    temporary_aespatcher="$project_root/tmp-aespatched-ios5-$$"
+    echo "[RUN] Compile the iOS 5 AES patcher"
+    clang++ -std=c++11 -O2 -Wall -Wextra -arch x86_64 \
+        "$project_root/bin/Darwin/aespatched.cpp" \
+        -o "$temporary_aespatcher"
+    local status=$?
+    [[ $status -eq 0 ]] || die "Compiling the iOS 5 AES patcher failed with exit status $status."
+    require_file "$temporary_aespatcher"
+    run_checked "Validate the iOS 5 AES patcher" "$temporary_aespatcher" --self-test
+    file "$temporary_aespatcher" | grep -q "x86_64" ||
+        die "The compiled iOS 5 AES patcher is not an x86_64 executable."
+    echo "[OK] Reproducible iOS 5 AES patcher is ready."
+}
+
 preflight_a4() {
     [[ "$platform" == "macos" ]] || die "A4 support requires macOS."
     [[ "$platform_arch" == "x86_64" ]] || die "A4 support requires an Intel Mac (x86_64); detected $platform_arch."
 
     case "$deviceid:$ios_version" in
-        "iPhone3,2:7.1.2"|"iPod4,1:6.1.6") ;;
-        *) die "Unsupported A4 firmware selection: $deviceid $ios_version. Supported pairs are iPhone3,2 7.1.2 and iPod4,1 6.1.6." ;;
+        "iPhone3,2:7.1.2"|"iPod4,1:6.1.6"|"iPad1,1:5.1.1") ;;
+        *) die "Unsupported A4 firmware selection: $deviceid $ios_version. Supported pairs are iPhone3,2 7.1.2, iPod4,1 6.1.6, and iPad1,1 5.1.1." ;;
     esac
 
     local command_name
@@ -74,6 +92,11 @@ preflight_a4() {
     file bin/Darwin/ipwnder | grep -q "x86_64" ||
         die "bin/Darwin/ipwnder is not an Intel-compatible executable."
     command -v hdiutil >/dev/null 2>&1 || die "hdiutil is required to build the A4 ramdisk."
+    if [[ "$deviceid" == "iPad1,1" ]]; then
+        require_file bin/Darwin/aespatched.cpp
+        command -v clang++ >/dev/null 2>&1 ||
+            die "clang++ from Xcode Command Line Tools is required for iPad1,1."
+    fi
     echo "[OK] A4 preflight passed for $deviceid $ios_version on $platform_arch."
 }
 
@@ -94,6 +117,11 @@ mk_bruteforce_ramdisk() {
     BuildID=$(printf '%s' "$firmware_info" | "$jq" -r '.[0].buildid // empty')
     [[ "$ipsw_link" == https://* && -n "$BuildID" ]] ||
         die "Firmware metadata is incomplete for $device $version."
+    if [[ "$device" == "iPad1,1" ]]; then
+        [[ "$version" == "5.1.1" && "$BuildID" == "9B206" && "$boardcfg" == "k48ap" ]] ||
+            die "Unexpected iPad1,1 firmware metadata: version=$version build=$BuildID board=$boardcfg."
+        build_ios5_aespatcher
+    fi
     iOS_Vers="${version%%.*}"
     echo "[OK] Firmware metadata: build $BuildID, board $boardcfg"
 
@@ -254,7 +282,13 @@ mk_bruteforce_ramdisk() {
         rm -rf work
 
         echo "Patching kernel..."
-        run_checked "Apply A4 AES kernel patch" ../../bin/Darwin/aespatched kernelcache kernelcache.dec
+        if [[ "$device" == "iPad1,1" ]]; then
+            run_checked "Apply iOS 5 A4 AES kernel patch" \
+                "$temporary_aespatcher" ios5 kernelcache kernelcache.dec
+        else
+            run_checked "Apply A4 AES kernel patch" \
+                ../../bin/Darwin/aespatched kernelcache kernelcache.dec
+        fi
         require_file kernelcache.dec
         mv kernelcache kernelcache.orig || die "Failed to preserve the original kernelcache."
         run_checked "Repack patched kernelcache" \
@@ -632,10 +666,15 @@ download_file() {
 
 get_device_info() {
     fake_deviceid=""
+    build_only=false
+    ramdisk_cache_version="2.0-a4.5"
     for arg in "$@"; do
         case $arg in
             fake-deviceid=*)
                 fake_deviceid="${arg#*=}"
+                ;;
+            build-only)
+                build_only=true
                 ;;
         esac
     done
@@ -662,7 +701,7 @@ get_device_info() {
         "iPhone5,2") device_name="iPhone 5 (Global)" default_version="9.0.2" pwnder="ipwndfu";;
         "iPhone5,3") device_name="iPhone 5C (GSM)" default_version="9.0.2" pwnder="ipwndfu";;
         "iPhone5,4") device_name="iPhone 5C (Global)" default_version="9.0.2" pwnder="ipwndfu";;
-    #   iPad1,1 remains unsupported because its iOS 5.1.1 AES patch needs rework.
+        "iPad1,1") device_name="iPad 1" default_version="5.1.1" pwnder="ipwnder32" is_a4=true ramdisk_cache_version="2.0-a4.6" ;;
         "iPad2,1") device_name="iPad 2 (Wi-Fi)" default_version="9.0.2" pwnder="a5";;
         "iPad2,2") device_name="iPad 2 (GSM)" default_version="9.0.2" pwnder="a5";;
         "iPad2,3") device_name="iPad 2 (CDMA)" default_version="9.0.2" pwnder="a5";;
@@ -931,6 +970,11 @@ echo "Checking is Ramdisk exists."
 echo ""
 
 check_ramdisk_cache
+
+if [[ "$build_only" == "true" ]]; then
+    echo "[OK] Build-only validation completed for $deviceid $ios_version."
+    return
+fi
 
 #mk_bruteforce_ramdisk $deviceid $ios_version
 
