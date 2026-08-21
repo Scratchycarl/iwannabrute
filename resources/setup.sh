@@ -47,9 +47,10 @@ first_block_device() {
 
 wait_for_data_device() {
     local attempt
-    for ((attempt=1; attempt<=60; attempt++)); do
+    for ((attempt=1; attempt<=120; attempt++)); do
         if first_block_device /dev/disk0s1s2 /dev/disk0s2s1 /dev/disk0s2 >/dev/null; then
             echo "Data partition device appeared after $attempt second(s)." > /dev/console
+            ls -l /dev/disk* > /dev/console 2>&1
             return 0
         fi
         delay_seconds 1
@@ -97,6 +98,37 @@ mount_and_verify_data() {
     return 1
 }
 
+start_usb_ssh() {
+    if [[ "$device_profile" == "iPad1,1" ]]; then
+        # The iOS 7 restored_external USB helper segfaults on this ramdisk.
+        # iPad rc.boot starts /sbin/sshd instead; a second start is harmless.
+        emit_phase START_RESTORED SKIPPED 0
+        if [[ -x /sbin/sshd ]]; then
+            /sbin/sshd >> /dev/console 2>&1
+            emit_phase START_SSHD EXIT "$?"
+        else
+            emit_phase START_SSHD SKIPPED 1
+        fi
+        return 0
+    fi
+
+    # restored_external initializes USB mux and runs sshd in inetd mode.
+    # Starting a standalone sshd first occupies port 22 and makes it exit.
+    emit_phase START_RESTORED START
+    /usr/local/bin/restored_external.sshrd >> /dev/console 2>&1 &
+    restored_pid=$!
+    delay_seconds 2
+    if kill -0 "$restored_pid" 2>/dev/null; then
+        emit_phase START_RESTORED RUNNING 0
+        emit_phase START_SSHD MANAGED_BY_RESTORED 0
+        return 0
+    fi
+    wait "$restored_pid"
+    restored_status=$?
+    emit_phase START_RESTORED EXIT "$restored_status"
+    fail_phase START_RESTORED "$restored_status"
+}
+
 echo "32-bit Bruteforce SSH Ramdisk by meowcat454, AJAIZ and platinumstuff" > /dev/console
 echo "--------------------------------" > /dev/console
 device_profile=""
@@ -104,8 +136,6 @@ if [[ -f /iwannabrute.profile ]]; then
     read -r device_profile < /iwannabrute.profile
     echo "Ramdisk profile: $device_profile" > /dev/console
 fi
-uname -a > /dev/console 2>&1
-ls -l /dev/disk* > /dev/console 2>&1
 emit_phase SETUP START
 
 if [[ "$device_profile" == "iPad1,1" ]]; then
@@ -126,27 +156,19 @@ fi
 run_phase SET_AUTOBOOT nvram auto-boot=1 ||
     fail_phase SET_AUTOBOOT "$?"
 
-# restored_external initializes USB mux and runs sshd in inetd mode. Starting a
-# standalone sshd first occupies port 22 and makes restored_external exit.
-emit_phase START_RESTORED START
-/usr/local/bin/restored_external.sshrd >> /dev/console 2>&1 &
-restored_pid=$!
-delay_seconds 2
-if kill -0 "$restored_pid" 2>/dev/null; then
-    emit_phase START_RESTORED RUNNING 0
-    emit_phase START_SSHD MANAGED_BY_RESTORED 0
+if [[ "$device_profile" == "iPad1,1" ]]; then
+    run_phase WAIT_DATA_DEVICE wait_for_data_device ||
+        fail_phase WAIT_DATA_DEVICE "$?"
+    run_phase MOUNT_DATA mount_and_verify_data ||
+        fail_phase MOUNT_DATA "$?"
+    start_usb_ssh
 else
-    wait "$restored_pid"
-    restored_status=$?
-    emit_phase START_RESTORED EXIT "$restored_status"
-    fail_phase START_RESTORED "$restored_status"
+    start_usb_ssh
+    run_phase WAIT_DATA_DEVICE wait_for_data_device ||
+        fail_phase WAIT_DATA_DEVICE "$?"
+    run_phase MOUNT_DATA mount_and_verify_data ||
+        fail_phase MOUNT_DATA "$?"
 fi
-
-run_phase WAIT_DATA_DEVICE wait_for_data_device ||
-    fail_phase WAIT_DATA_DEVICE "$?"
-
-run_phase MOUNT_DATA mount_and_verify_data ||
-    fail_phase MOUNT_DATA "$?"
 
 if [[ -d /mnt1/private/etc ]]; then
     persistent_phase_log="/mnt1/private/etc/iwannabrute-phases.log"

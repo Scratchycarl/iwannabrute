@@ -1,0 +1,7 @@
+#!/bin/sh
+# iPad1,1 / iOS 5 ramdisk boot.
+# The ssh.tar.gz rc.boot remounts / (GetMasterBlock panic risk) and continues
+# into restored_update after setup exits. Start sshd, then hand off to setup.
+nvram auto-boot=1
+/sbin/sshd
+exec /usr/local/bin/restored_external
