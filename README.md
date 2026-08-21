@@ -32,14 +32,6 @@ Passcode checking uses userland derivation (`Bruteforcing using manual derivatio
 
 The tool will use the AES engine as much as possible with no restrictions at the full speed. 80 milliseconds is a value that Apple uses to calibrate it's software to this day.
 
-# Soon™
-
-- Linux support
-- Disable password automatically
-
-# Other Stuff
-
-- [Reddit Post](https://www.reddit.com/r/setupapp/comments/1jn09d5/release_iwannabrute_bruteforce_a5a6_with_ease/)
 
 # Credits
 - [AJAIZ](https://github.com/AsyJAIZ) for original bruteforce method.
