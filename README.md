@@ -47,4 +47,5 @@ The tool will use the AES engine as much as possible with no restrictions at the
 - [Nathan](https://github.com/verygenericname) for some code from SSHRD_Script.
 - [LukeeZGD](https://github.com/LukeZGD) for a lot code.
 - [Scratchycarl](https://github.com/Scratchycarl) for verified A4 iPad 1 support.
+- [Platinumstufff](https://github.com/platinumstufff) for original iwannabrute script.
 - And anyone else I forgot to mention.
