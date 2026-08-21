@@ -98,6 +98,51 @@ mount_and_verify_data() {
     return 1
 }
 
+run_ipad_bruteforce() {
+    local sentinel pid found=0 f
+    if [[ -d /mnt1/private/etc ]]; then
+        sentinel="/mnt1/private/etc/iwannabrute-keystore-started"
+    else
+        sentinel="/mnt2/iwannabrute-keystore-started"
+    fi
+    : > "$sentinel"
+
+    echo "Trying AppleKeyStore kernel service." > /dev/console
+    emit_phase BRUTEFORCE_METHOD KEYSTORE
+    /usr/bin/bruteforce -u -n >> /dev/console 2>&1 &
+    pid=$!
+    delay_seconds 8
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        for f in /mnt1/private/etc/*.plist; do
+            if [[ -f "$f" && "$f" -nt "$sentinel" ]]; then
+                found=1
+            fi
+        done
+        if [[ "$found" -eq 1 ]]; then
+            return 0
+        fi
+        echo "AppleKeyStore exited immediately; falling back to userland derivation." > /dev/console
+        emit_phase BRUTEFORCE_METHOD USERLAND_FALLBACK
+        /usr/bin/bruteforce -n >> /dev/console 2>&1
+        return $?
+    fi
+
+    echo "AppleKeyStore is running; waiting for it to finish." > /dev/console
+    wait "$pid" 2>/dev/null || true
+    for f in /mnt1/private/etc/*.plist; do
+        if [[ -f "$f" && "$f" -nt "$sentinel" ]]; then
+            found=1
+        fi
+    done
+    if [[ "$found" -eq 1 ]]; then
+        return 0
+    fi
+    echo "AppleKeyStore did not write a new result; falling back to userland derivation." > /dev/console
+    emit_phase BRUTEFORCE_METHOD USERLAND_FALLBACK
+    /usr/bin/bruteforce -n >> /dev/console 2>&1
+}
+
 start_usb_ssh() {
     if [[ "$device_profile" == "iPad1,1" ]]; then
         # The iOS 7 restored_external USB helper segfaults on this ramdisk.
@@ -187,7 +232,11 @@ fi
 # confirmed successful connection to IOAESAccelerator.
 emit_phase AES_ACCESS ATTEMPT
 emit_phase BRUTEFORCE START
-/usr/bin/bruteforce >> /dev/console 2>&1
+if [[ "$device_profile" == "iPad1,1" ]]; then
+    run_ipad_bruteforce
+else
+    /usr/bin/bruteforce >> /dev/console 2>&1
+fi
 bruteforce_status=$?
 emit_phase BRUTEFORCE EXIT "$bruteforce_status"
 emit_phase AES_ACCESS PROCESS_EXIT "$bruteforce_status"

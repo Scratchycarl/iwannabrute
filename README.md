@@ -43,7 +43,7 @@ iwannabrute needs initial setup before usage.
 
 The tool will use the AES engine as much as possible with no restrictions at the full speed. 80 milliseconds is a value that Apple uses to calibrate it's software to this day.
 
-iPad 1 on iOS 5.1.1 currently uses userland (“manual”) derivation against the UID AES engine. That is still hardware AES, but each guess pays extra syscall overhead, so 4-digit codes can take longer than the 13-minute 80 ms/p figure.
+iPad 1 on iOS 5.1.1 first tries the AppleKeyStore kernel service (`bruteforce -u`). If that service is missing, stalls, or does not find the passcode, it falls back to userland (“manual”) derivation against the UID AES engine.
 
 
 # Soon™
