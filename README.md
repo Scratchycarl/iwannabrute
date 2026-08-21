@@ -29,7 +29,7 @@ iwannabrute needs initial setup before usage.
  
 1. Clone and cd into this repository: `git clone https://github.com/platinumstufff/iwannabrute --recursive && cd iwannabrute`
 2. Place your device into DFU mode
-3. Run ./start.sh
+3. Run `./start.sh`
 
 # Estimated bruteforce time
 
@@ -43,8 +43,7 @@ iwannabrute needs initial setup before usage.
 
 The tool will use the AES engine as much as possible with no restrictions at the full speed. 80 milliseconds is a value that Apple uses to calibrate it's software to this day.
 
-iPad 1 on iOS 5.1.1 first tries the AppleKeyStore kernel service (`bruteforce -u`). If that service is missing, stalls, or does not find the passcode, it falls back to userland (“manual”) derivation against the UID AES engine.
-
+iPad 1 on iOS 5.1.1 first tries the AppleKeyStore kernel service (`bruteforce -u`, 4-digit only). If that service is missing or does not produce a result, it falls back to userland (“manual”) derivation against the UID AES engine, which can continue through longer numeric passcodes. Progress lines stay on screen; individual guess digits are not printed.
 
 # Soon™
 
@@ -60,4 +59,5 @@ iPad 1 on iOS 5.1.1 first tries the AppleKeyStore kernel service (`bruteforce -u
 - [mewcat454](https://www.reddit.com/u/meowcat454) for original ramdisk.
 - [Nathan](https://github.com/verygenericname) for some code from SSHRD_Script.
 - [LukeeZGD](https://github.com/LukeZGD) for a lot code.
+- [Scratchycarl](https://github.com/Scratchycarl) for verified A4 iPad 1 support.
 - And anyone else I forgot to mention.

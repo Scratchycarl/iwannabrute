@@ -116,8 +116,26 @@ mount_and_verify_data() {
     return 1
 }
 
+filter_bruteforce_console() {
+    # Hide the raw per-guess digits while keeping status, ETA, and result lines.
+    local line
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            ''|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
+                continue
+                ;;
+        esac
+        echo "$line" > /dev/console
+    done
+}
+
+run_bruteforce() {
+    /usr/bin/bruteforce "$@" 2>&1 | filter_bruteforce_console
+    return "${PIPESTATUS[0]}"
+}
+
 run_ipad_bruteforce() {
-    local sentinel pid found=0 f
+    local sentinel found=0 f
     if [[ -d /mnt1/private/etc ]]; then
         sentinel="/mnt1/private/etc/iwannabrute-keystore-started"
     else
@@ -127,27 +145,7 @@ run_ipad_bruteforce() {
 
     echo "Trying AppleKeyStore kernel service." > /dev/console
     emit_phase BRUTEFORCE_METHOD KEYSTORE
-    /usr/bin/bruteforce -u -n >> /dev/console 2>&1 &
-    pid=$!
-    delay_seconds 8
-    if ! kill -0 "$pid" 2>/dev/null; then
-        wait "$pid" 2>/dev/null || true
-        for f in /mnt1/private/etc/*.plist; do
-            if [[ -f "$f" && "$f" -nt "$sentinel" ]]; then
-                found=1
-            fi
-        done
-        if [[ "$found" -eq 1 ]]; then
-            return 0
-        fi
-        echo "AppleKeyStore exited immediately; falling back to userland derivation." > /dev/console
-        emit_phase BRUTEFORCE_METHOD USERLAND_FALLBACK
-        /usr/bin/bruteforce -n >> /dev/console 2>&1
-        return $?
-    fi
-
-    echo "AppleKeyStore is running; waiting for it to finish." > /dev/console
-    wait "$pid" 2>/dev/null || true
+    run_bruteforce -u -n
     for f in /mnt1/private/etc/*.plist; do
         if [[ -f "$f" && "$f" -nt "$sentinel" ]]; then
             found=1
@@ -158,7 +156,7 @@ run_ipad_bruteforce() {
     fi
     echo "AppleKeyStore did not write a new result; falling back to userland derivation." > /dev/console
     emit_phase BRUTEFORCE_METHOD USERLAND_FALLBACK
-    /usr/bin/bruteforce -n >> /dev/console 2>&1
+    run_bruteforce -n
 }
 
 start_usb_ssh() {
@@ -192,7 +190,7 @@ start_usb_ssh() {
     fail_phase START_RESTORED "$restored_status"
 }
 
-echo "32-bit Bruteforce SSH Ramdisk by meowcat454, AJAIZ and platinumstuff" > /dev/console
+echo "32-bit Bruteforce SSH Ramdisk by meowcat454, AJAIZ, platinumstuff and Scratchycarl" > /dev/console
 echo "--------------------------------" > /dev/console
 device_profile=""
 if [[ -f /iwannabrute.profile ]]; then
@@ -253,7 +251,7 @@ emit_phase BRUTEFORCE START
 if [[ "$device_profile" == "iPad1,1" ]]; then
     run_ipad_bruteforce
 else
-    /usr/bin/bruteforce >> /dev/console 2>&1
+    run_bruteforce
 fi
 bruteforce_status=$?
 emit_phase BRUTEFORCE EXIT "$bruteforce_status"
