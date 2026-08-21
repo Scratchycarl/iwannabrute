@@ -11,7 +11,7 @@ Bruteforce A4-A6 numeric password with ease.
 
 # Compatible devices
 
-Use the **A4** branch for all verified A4 devices:
+## A4 (verified)
 
 | Device | Identifier | iOS |
 | ------------ | ------------ | ------------ |
@@ -19,7 +19,9 @@ Use the **A4** branch for all verified A4 devices:
 | iPod touch 4 | iPod4,1 | 6.1.6 |
 | iPad 1 | iPad1,1 | 5.1.1 |
 
-A5–A6 devices continue to use the original ramdisk path on `2.0` / `main`.
+## A5–A6
+
+iPhone 4S, iPhone 5, iPhone 5C, iPad 2, iPad 3, iPad 4, iPad mini 1, and iPod touch 5. Default ramdisk version is 9.0.2.
 
 # Usage
 iwannabrute needs initial setup before usage.
@@ -31,7 +33,7 @@ iwannabrute needs initial setup before usage.
 2. Place your device into DFU mode
 3. Run `./start.sh`
 
-On iPad 1, passcode checking uses the same userland derivation path as A5–A6 (`Bruteforcing using manual derivation`).
+Passcode checking uses userland derivation (`Bruteforcing using manual derivation`), starting at 4 digits and continuing through 8 if needed.
 
 # Estimated bruteforce time
 
