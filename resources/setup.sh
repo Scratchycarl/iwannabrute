@@ -40,23 +40,18 @@ fail_phase() {
 }
 
 delay_seconds() {
-    # Never read /dev/console here: kernel logs can block forever on a partial
-    # line. The iPad ramdisk ships a fifo for bash read -t; fall back to date.
-    if [[ -p /iwannabrute.delay ]]; then
-        read -r -t "$1" _ <> /iwannabrute.delay || true
-        return
-    fi
+    # Never read /dev/console (kernel logs can block on a partial line).
+    # Never open a fifo for read -t: iOS bash can block forever on open when
+    # there is no writer, and timeout does not apply to that open.
     local start end now
-    start="$(date +%s 2>/dev/null)" || start=""
+    start="$(/bin/date +%s 2>/dev/null)" || start="$(date +%s 2>/dev/null)" || start=""
     if [[ -n "$start" ]]; then
         end=$((start + $1))
-        while true; do
-            now="$(date +%s 2>/dev/null)" || break
-            [[ "$now" -ge "$end" ]] && break
+        now="$start"
+        while [[ "$now" -lt "$end" ]]; do
+            now="$(/bin/date +%s 2>/dev/null)" || now="$(date +%s 2>/dev/null)" || break
         done
-        return
     fi
-    read -r -t "$1" _ < /dev/null || true
 }
 
 first_block_device() {
@@ -78,8 +73,11 @@ wait_for_data_device() {
             ls -l /dev/disk* > /dev/console 2>&1
             return 0
         fi
-        if (( attempt == 1 || attempt % 30 == 0 )); then
+        if (( attempt == 1 || attempt % 5 == 0 )); then
             echo "Waiting for data partition (${attempt}s)..." > /dev/console
+            if (( attempt == 1 )); then
+                ls -l /dev/disk* > /dev/console 2>&1
+            fi
         fi
         delay_seconds 1
     done

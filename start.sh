@@ -1,7 +1,7 @@
 #!/bin/bash
 
 script_version="2.0"
-ramdisk_cache_version="2.0-a4.13"
+ramdisk_cache_version="2.0-a4.14"
 
 die() {
     echo "[ERROR] $*" >&2
@@ -249,8 +249,6 @@ mk_bruteforce_ramdisk() {
             chmod +x ramdisk_mountpoint/private/etc/rc.boot ||
                 die "Failed to make iPad1,1 rc.boot executable."
             rm -f ramdisk_mountpoint/iwannabrute.delay
-            mkfifo ramdisk_mountpoint/iwannabrute.delay ||
-                die "Failed to create the iPad1,1 delay fifo."
         fi
         run_checked "Set ramdisk payload permissions" \
             chmod +x \
@@ -681,7 +679,7 @@ download_file() {
 get_device_info() {
     fake_deviceid=""
     build_only=false
-    ramdisk_cache_version="2.0-a4.13"
+    ramdisk_cache_version="2.0-a4.14"
     for arg in "$@"; do
         case $arg in
             fake-deviceid=*)
@@ -715,7 +713,7 @@ get_device_info() {
         "iPhone5,2") device_name="iPhone 5 (Global)" default_version="9.0.2" pwnder="ipwndfu";;
         "iPhone5,3") device_name="iPhone 5C (GSM)" default_version="9.0.2" pwnder="ipwndfu";;
         "iPhone5,4") device_name="iPhone 5C (Global)" default_version="9.0.2" pwnder="ipwndfu";;
-        "iPad1,1") device_name="iPad 1" default_version="5.1.1" pwnder="ipwnder32" is_a4=true ramdisk_cache_version="2.0-a4.13" ;;
+        "iPad1,1") device_name="iPad 1" default_version="5.1.1" pwnder="ipwnder32" is_a4=true ramdisk_cache_version="2.0-a4.14" ;;
         "iPad2,1") device_name="iPad 2 (Wi-Fi)" default_version="9.0.2" pwnder="a5";;
         "iPad2,2") device_name="iPad 2 (GSM)" default_version="9.0.2" pwnder="a5";;
         "iPad2,3") device_name="iPad 2 (CDMA)" default_version="9.0.2" pwnder="a5";;
