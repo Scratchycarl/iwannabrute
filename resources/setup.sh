@@ -29,15 +29,29 @@ fail_phase() {
 }
 
 delay_seconds() {
-    # The minimal A4 restore ramdisk has no sleep executable. Bash's timed read
-    # provides a low-overhead delay without writing a temporary file.
-    read -r -t "$1" _ < /dev/console || true
+    # Never read /dev/console here: kernel logs can block forever on a partial
+    # line. The iPad ramdisk ships a fifo for bash read -t; fall back to date.
+    if [[ -p /iwannabrute.delay ]]; then
+        read -r -t "$1" _ <> /iwannabrute.delay || true
+        return
+    fi
+    local start end now
+    start="$(date +%s 2>/dev/null)" || start=""
+    if [[ -n "$start" ]]; then
+        end=$((start + $1))
+        while true; do
+            now="$(date +%s 2>/dev/null)" || break
+            [[ "$now" -ge "$end" ]] && break
+        done
+        return
+    fi
+    read -r -t "$1" _ < /dev/null || true
 }
 
 first_block_device() {
     local candidate
     for candidate in "$@"; do
-        if [[ -b "$candidate" ]]; then
+        if [[ -b "$candidate" || -e "$candidate" ]]; then
             echo "$candidate"
             return 0
         fi
@@ -52,6 +66,10 @@ wait_for_data_device() {
             echo "Data partition device appeared after $attempt second(s)." > /dev/console
             ls -l /dev/disk* > /dev/console 2>&1
             return 0
+        fi
+        if (( attempt == 1 || attempt % 10 == 0 )); then
+            echo "Waiting for data partition (${attempt}s)..." > /dev/console
+            ls -l /dev/disk* > /dev/console 2>&1
         fi
         delay_seconds 1
     done

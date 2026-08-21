@@ -248,6 +248,9 @@ mk_bruteforce_ramdisk() {
                 cp ../../../resources/rc.boot.ipad ramdisk_mountpoint/private/etc/rc.boot
             chmod +x ramdisk_mountpoint/private/etc/rc.boot ||
                 die "Failed to make iPad1,1 rc.boot executable."
+            rm -f ramdisk_mountpoint/iwannabrute.delay
+            mkfifo ramdisk_mountpoint/iwannabrute.delay ||
+                die "Failed to create the iPad1,1 delay fifo."
         fi
         run_checked "Set ramdisk payload permissions" \
             chmod +x \
@@ -712,7 +715,7 @@ get_device_info() {
         "iPhone5,2") device_name="iPhone 5 (Global)" default_version="9.0.2" pwnder="ipwndfu";;
         "iPhone5,3") device_name="iPhone 5C (GSM)" default_version="9.0.2" pwnder="ipwndfu";;
         "iPhone5,4") device_name="iPhone 5C (Global)" default_version="9.0.2" pwnder="ipwndfu";;
-        "iPad1,1") device_name="iPad 1" default_version="5.1.1" pwnder="ipwnder32" is_a4=true ramdisk_cache_version="2.0-a4.10" ;;
+        "iPad1,1") device_name="iPad 1" default_version="5.1.1" pwnder="ipwnder32" is_a4=true ramdisk_cache_version="2.0-a4.11" ;;
         "iPad2,1") device_name="iPad 2 (Wi-Fi)" default_version="9.0.2" pwnder="a5";;
         "iPad2,2") device_name="iPad 2 (GSM)" default_version="9.0.2" pwnder="a5";;
         "iPad2,3") device_name="iPad 2 (CDMA)" default_version="9.0.2" pwnder="a5";;
