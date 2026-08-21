@@ -1,77 +1,172 @@
 #!/bin/bash
 
-script_version="1.2.0"
+script_version="2.0"
+ramdisk_cache_version="2.0-a4.16"
+
+die() {
+    echo "[ERROR] $*" >&2
+    exit 1
+}
+
+require_file() {
+    [[ -s "$1" ]] || die "Required file is missing or empty: $1"
+}
+
+run_checked() {
+    local description="$1"
+    shift
+    echo "[RUN] $description"
+    "$@"
+    local status=$?
+    [[ $status -eq 0 ]] || die "$description failed with exit status $status."
+}
+
+cleanup_build_mount() {
+    if [[ -n "$active_mountpoint" && -d "$active_mountpoint" ]]; then
+        echo "[CLEANUP] Detaching $active_mountpoint"
+        sudo hdiutil detach "$active_mountpoint" >/dev/null 2>&1 || true
+        active_mountpoint=""
+    fi
+    if [[ -n "$temporary_aespatcher" && -f "$temporary_aespatcher" ]]; then
+        rm -f "$temporary_aespatcher"
+    fi
+}
+
+init_diagnostic_log() {
+    mkdir -p logs || die "Unable to create the logs directory."
+    diagnostic_log="$(pwd)/logs/a4-$(date '+%Y%m%d-%H%M%S').log"
+    touch "$diagnostic_log" || die "Unable to create diagnostic log: $diagnostic_log"
+    exec > >(tee -a "$diagnostic_log") 2>&1
+    echo "[INFO] Diagnostic log: $diagnostic_log"
+    echo "[INFO] Started: $(date '+%Y-%m-%d %H:%M:%S %z')"
+}
+
+build_ios5_aespatcher() {
+    temporary_aespatcher="$project_root/tmp-aespatched-ios5-$$"
+    echo "[RUN] Compile the iOS 5 AES patcher"
+    clang++ -std=c++11 -O2 -Wall -Wextra -arch x86_64 \
+        "$project_root/bin/Darwin/aespatched.cpp" \
+        -o "$temporary_aespatcher"
+    local status=$?
+    [[ $status -eq 0 ]] || die "Compiling the iOS 5 AES patcher failed with exit status $status."
+    require_file "$temporary_aespatcher"
+    run_checked "Validate the iOS 5 AES patcher" "$temporary_aespatcher" --self-test
+    file "$temporary_aespatcher" | grep -q "x86_64" ||
+        die "The compiled iOS 5 AES patcher is not an x86_64 executable."
+    echo "[OK] Reproducible iOS 5 AES patcher is ready."
+}
+
+preflight_a4() {
+    [[ "$platform" == "macos" ]] || die "A4 support requires macOS."
+    [[ "$platform_arch" == "x86_64" ]] || die "A4 support requires an Intel Mac (x86_64); detected $platform_arch."
+
+    case "$deviceid:$ios_version" in
+        "iPhone3,2:7.1.2"|"iPod4,1:6.1.6"|"iPad1,1:5.1.1") ;;
+        *) die "Unsupported A4 firmware selection: $deviceid $ios_version. Supported pairs are iPhone3,2 7.1.2, iPod4,1 6.1.6, and iPad1,1 5.1.1." ;;
+    esac
+
+    local command_name
+    for command_name in awk curl file grep hdiutil sed tar tee tr xargs; do
+        command -v "$command_name" >/dev/null 2>&1 ||
+            die "Required A4 build command is not installed: $command_name"
+    done
+
+    local asset
+    for asset in \
+        bin/Darwin/aespatched \
+        bin/Darwin/iBoot32Patcher \
+        bin/Darwin/ipwnder \
+        bin/Darwin/irecovery \
+        bin/Darwin/jq \
+        bin/Darwin/partialZipBrowser \
+        bin/Darwin/xpwntool \
+        resources/bruteforce \
+        resources/device_infos \
+        resources/firmware.json \
+        resources/restored_external \
+        resources/setup.sh \
+        resources/rc.boot.ipad \
+        resources/ssh.tar.gz; do
+        require_file "$asset"
+    done
+
+    file bin/Darwin/ipwnder | grep -q "x86_64" ||
+        die "bin/Darwin/ipwnder is not an Intel-compatible executable."
+    command -v hdiutil >/dev/null 2>&1 || die "hdiutil is required to build the A4 ramdisk."
+    if [[ "$deviceid" == "iPad1,1" ]]; then
+        require_file bin/Darwin/aespatched.cpp
+        command -v clang++ >/dev/null 2>&1 ||
+            die "clang++ from Xcode Command Line Tools is required for iPad1,1."
+    fi
+    echo "[OK] A4 preflight passed for $deviceid $ios_version on $platform_arch."
+}
 
 mk_bruteforce_ramdisk() {
-        device=$1
-        version=$2
+    local device="$1"
+    local version="$2"
+    local boardcfg firmware_info ipsw_link BuildID iOS_Vers key_page
+    local images temp_type temp_type2 key_field component component_file
+    local component_iv component_key i
 
-        echo "Making bruteforce ramdisk..."
-        # ramdisk based on meowcat454 and @Ralph0045 work
+    echo "Making bruteforce ramdisk for $device $version..."
+    boardcfg=$("$jq" -r --arg device "$device" '.devices[$device].BoardConfig // empty' resources/firmware.json)
+    [[ -n "$boardcfg" ]] || die "No BoardConfig metadata found for $device."
 
-        boardcfg="$((cat resources/firmware.json) | grep $device -A4 | grep BoardConfig | sed 's/"BoardConfig"//' | sed 's/: "//' | sed 's/",//' | xargs)"
-        {
-        if [ -z "$version" ]; then
-        ipsw_link=$(curl "https://api.ipsw.me/v2.1/$device/earliest/url")
-        version=$(curl "https://api.ipsw.me/v2.1/$device/earliest/info.json" | grep version | sed s+'"version": "'++ | sed s+'",'++ | xargs)
-        BuildID=$(curl "https://api.ipsw.me/v2.1/$device/earliest/info.json" | grep buildid | sed s+'"buildid": "'++ | sed s+'",'++ | xargs)
-        else
-        ipsw_link=$(curl "https://api.ipsw.me/v2.1/$device/$version/url")
-        BuildID=$(curl "https://api.ipsw.me/v2.1/$device/$version/info.json" | grep buildid | sed s+'"buildid": "'++ | sed s+'",'++ | xargs)
-        fi
-        } &> /dev/null
-        iOS_Vers=`echo $version | awk -F. '{print $1}'`
+    firmware_info=$(curl -fsS "https://api.ipsw.me/v2.1/$device/$version/info.json") ||
+        die "Failed to download firmware metadata for $device $version."
+    ipsw_link=$(printf '%s' "$firmware_info" | "$jq" -r '.[0].url // empty')
+    BuildID=$(printf '%s' "$firmware_info" | "$jq" -r '.[0].buildid // empty')
+    [[ "$ipsw_link" == https://* && -n "$BuildID" ]] ||
+        die "Firmware metadata is incomplete for $device $version."
+    if [[ "$device" == "iPad1,1" ]]; then
+        [[ "$version" == "5.1.1" && "$BuildID" == "9B206" && "$boardcfg" == "k48ap" ]] ||
+            die "Unexpected iPad1,1 firmware metadata: version=$version build=$BuildID board=$boardcfg."
+        build_ios5_aespatcher
+    fi
+    iOS_Vers="${version%%.*}"
+    echo "[OK] Firmware metadata: build $BuildID, board $boardcfg"
 
-        mkdir -p ramdisks/bruteforce-$device-$version/work
+    mkdir -p "ramdisks/bruteforce-$device-$version/work" ||
+        die "Unable to create the ramdisk work directory."
+    cd "ramdisks/bruteforce-$device-$version/work" ||
+        die "Unable to enter the ramdisk work directory."
+    echo "$ramdisk_cache_version" > ../version || die "Unable to write the ramdisk cache version."
 
-        cd ramdisks/bruteforce-$device-$version/work
-
-        echo "$script_version" > ../version
-
-        ## Get firmware keys from The Apple Wiki's MediaWiki API
-
-        echo Downloading firmware keys...
-
-        key_page=$(
-            curl -fsSG "https://theapplewiki.com/api.php" \
-                --data-urlencode "action=query" \
-                --data-urlencode "list=search" \
-                --data-urlencode "srsearch=\"$BuildID\" \"$device\"" \
-                --data-urlencode "srnamespace=2304" \
-                --data-urlencode "format=json" \
-                --data-urlencode "formatversion=2" |
-                ../../../bin/Darwin/jq -r '.query.search[0].title // empty'
-        )
-
-        if [[ -z "$key_page" ]]; then
-            echo "Failed to find firmware keys for $device $version ($BuildID)."
-            exit 1
-        fi
-
+    echo "Downloading firmware keys..."
+    key_page=$(
         curl -fsSG "https://theapplewiki.com/api.php" \
             --data-urlencode "action=query" \
-            --data-urlencode "prop=revisions" \
-            --data-urlencode "rvprop=content" \
-            --data-urlencode "rvslots=main" \
-            --data-urlencode "titles=$key_page" \
+            --data-urlencode "list=search" \
+            --data-urlencode "srsearch=\"$BuildID\" \"$device\"" \
+            --data-urlencode "srnamespace=2304" \
             --data-urlencode "format=json" \
             --data-urlencode "formatversion=2" |
-            ../../../bin/Darwin/jq -r '.query.pages[0].revisions[0].slots.main.content // empty' \
-            > temp_keys.txt
+            ../../../bin/Darwin/jq -r '.query.search[0].title // empty'
+    )
+    [[ -n "$key_page" ]] ||
+        die "Failed to find firmware keys for $device $version ($BuildID)."
 
-        if [[ ! -s "temp_keys.txt" ]]; then
-            echo "Failed to download firmware keys for $device $version ($BuildID)."
-            exit 1
-        fi
-        echo Done!
-        ../../../bin/Darwin/partialZipBrowser -g BuildManifest.plist $ipsw_link &> /dev/null
+    curl -fsSG "https://theapplewiki.com/api.php" \
+        --data-urlencode "action=query" \
+        --data-urlencode "prop=revisions" \
+        --data-urlencode "rvprop=content" \
+        --data-urlencode "rvslots=main" \
+        --data-urlencode "titles=$key_page" \
+        --data-urlencode "format=json" \
+        --data-urlencode "formatversion=2" |
+        ../../../bin/Darwin/jq -r '.query.pages[0].revisions[0].slots.main.content // empty' \
+        > temp_keys.txt
+    require_file temp_keys.txt
+    echo "[OK] Firmware keys page: $key_page"
 
-        images="iBSS.iBEC.applelogo.DeviceTree.kernelcache.RestoreRamDisk"
-        for i in {1..6}
-        do
-            temp_type="$((echo $images) | awk -v var=$i -F. '{print $var}' | awk '{print tolower($0)}')"
-            temp_type2="$((echo $images) | awk -v var=$i -F. '{print $var}')"
+    run_checked "Download BuildManifest.plist" \
+        ../../../bin/Darwin/partialZipBrowser -g BuildManifest.plist "$ipsw_link"
+    require_file BuildManifest.plist
 
+    images="iBSS.iBEC.applelogo.DeviceTree.kernelcache.RestoreRamDisk"
+    for i in {1..6}; do
+        temp_type2=$(echo "$images" | awk -v var="$i" -F. '{print $var}')
+        temp_type=$(echo "$temp_type2" | tr '[:upper:]' '[:lower:]')
         case "$temp_type2" in
             applelogo) key_field="AppleLogo" ;;
             kernelcache) key_field="Kernelcache" ;;
@@ -81,114 +176,139 @@ mk_bruteforce_ramdisk() {
 
         component_iv=$(sed -n "s/^[[:space:]]*|[[:space:]]*${key_field}IV[[:space:]]*=[[:space:]]*//p" temp_keys.txt | xargs)
         component_key=$(sed -n "s/^[[:space:]]*|[[:space:]]*${key_field}Key[[:space:]]*=[[:space:]]*//p" temp_keys.txt | xargs)
+        [[ "$component_iv" =~ ^[[:xdigit:]]{32}$ && "$component_key" =~ ^[[:xdigit:]]{64}$ ]] ||
+            die "Missing or invalid $temp_type2 firmware keys for $device $version ($BuildID)."
 
-        if [[ ! "$component_iv" =~ ^[[:xdigit:]]{32}$ || ! "$component_key" =~ ^[[:xdigit:]]{64}$ ]]; then
-            echo "Missing or invalid $temp_type2 firmware keys for $device $version ($BuildID)."
-            exit 1
-        fi
-
-        eval "$temp_type"_iv="$component_iv"
-        eval "$temp_type"_key="$component_key"
-        iv=$temp_type"_iv"
-        key=$temp_type"_key"
-
-        if [ "$temp_type2" = "RestoreRamDisk" ]; then
-            component="$((cat BuildManifest.plist) | grep -i $boardcfg -A 3000 | grep $temp_type2 -A 100| grep dmg -m 1 | sed s+'<string>'++ | sed s+'</string>'++ | xargs)"
+        if [[ "$temp_type2" == "RestoreRamDisk" ]]; then
+            component=$(grep -i "$boardcfg" BuildManifest.plist -A 3000 | grep "$temp_type2" -A 100 | grep dmg -m 1 | sed 's/<string>//; s/<\/string>//' | xargs)
         else
-            component="$((cat BuildManifest.plist) | grep -i $boardcfg -A 3000 | grep $temp_type2 | grep string -m 1 | sed s+'<string>'++ | sed s+'</string>'++ | xargs)"
+            component=$(grep -i "$boardcfg" BuildManifest.plist -A 3000 | grep "$temp_type2" | grep string -m 1 | sed 's/<string>//; s/<\/string>//' | xargs)
         fi
-        
-            echo Downloading $component...
-        
-            ../../../bin/Darwin/partialZipBrowser -g $component $ipsw_link &> /dev/null
-        
-            echo Done!
-        
-            if [ "$is_64" = "true" ]; then
-                if [ "$temp_type2" = "RestoreRamDisk" ]; then
-                    ../../../bin/Darwin/img4 -i $component -o RestoreRamDisk.raw.dmg ${!iv}${!key}
-                        if [ "$iOS_Vers" -gt "11" ]; then
-                        echo Downloading $component.trustcache...
-                        ../../../bin/Darwin/partialZipBrowser -g Firmware/$component.trustcache $ipsw_link &> /dev/null
-                        echo Done!
-                    fi
-            else
-                    ../../../bin/Darwin/img4 -i $temp_type2* -o $temp_type2.raw ${!iv}${!key}
-                fi
-            else
-        
-                if [ "$temp_type2" = "RestoreRamDisk" ]; then
-                    ../../../bin/Darwin/xpwntool $component RestoreRamDisk.dec.img3 -iv ${!iv} -k ${!key} -decrypt &> /dev/null
-            else
-                    ../../../bin/Darwin/xpwntool $temp_type2* $temp_type2.dec.img3 -iv ${!iv} -k ${!key} -decrypt &> /dev/null
-                fi
-            fi
-        done
-        echo "Making ramdisk..."
+        [[ -n "$component" ]] || die "BuildManifest has no $temp_type2 component for board $boardcfg."
+
+        run_checked "Download $component" \
+            ../../../bin/Darwin/partialZipBrowser -g "$component" "$ipsw_link"
+        component_file="${component##*/}"
+        require_file "$component_file"
+
+        if [[ "$temp_type2" == "RestoreRamDisk" ]]; then
+            run_checked "Decrypt RestoreRamDisk" \
+                ../../../bin/Darwin/xpwntool "$component_file" RestoreRamDisk.dec.img3 \
+                -iv "$component_iv" -k "$component_key" -decrypt
+            require_file RestoreRamDisk.dec.img3
+        else
+            run_checked "Decrypt $temp_type2" \
+                ../../../bin/Darwin/xpwntool "$component_file" "$temp_type2.dec.img3" \
+                -iv "$component_iv" -k "$component_key" -decrypt
+            require_file "$temp_type2.dec.img3"
+        fi
+    done
+
+    echo "Making ramdisk..."
     bootargs="-v amfi=0xff cs_enforcement_disable=1 msgbuf=1048576 wdt=-1"
 
-    if [ "$is_64" = "true" ]; then
-        echo "no"
+    if [[ "$is_64" == "true" ]]; then
+        die "This A4 ramdisk builder only supports 32-bit devices."
     else
-        ../../../bin/Darwin/xpwntool RestoreRamDisk.dec.img3 RestoreRamDisk.raw.dmg
-        hdiutil resize -size 30MB RestoreRamDisk.raw.dmg
-        mkdir ramdisk_mountpoint
-        sudo hdiutil attach -mountpoint ramdisk_mountpoint/ -owners off RestoreRamDisk.raw.dmg
+        run_checked "Extract RestoreRamDisk image" \
+            ../../../bin/Darwin/xpwntool RestoreRamDisk.dec.img3 RestoreRamDisk.raw.dmg
+        require_file RestoreRamDisk.raw.dmg
+        run_checked "Resize RestoreRamDisk image" hdiutil resize -size 30MB RestoreRamDisk.raw.dmg
+        mkdir -p ramdisk_mountpoint || die "Unable to create ramdisk mountpoint."
+        run_checked "Mount RestoreRamDisk image" \
+            sudo hdiutil attach -mountpoint ramdisk_mountpoint/ -owners off RestoreRamDisk.raw.dmg
+        active_mountpoint="$(pwd)/ramdisk_mountpoint"
+        [[ -d ramdisk_mountpoint/usr ]] || die "RestoreRamDisk mounted without a /usr directory."
+
         tar -xvf ../../../resources/ssh.tar.gz -C ramdisk_mountpoint/
-        if [ "$iOS_Vers" -gt 7 ]; then
-        echo "iOS 8 or later detected, patching restored_external..."
-        cp ramdisk_mountpoint/usr/local/bin/restored_external ramdisk_mountpoint/usr/local/bin/restored_external.real
-        cp ../../../resources/setup.sh ramdisk_mountpoint/usr/local/bin/restored_external
-        chmod +x ramdisk_mountpoint/usr/local/bin/restored_external
+        [[ $? -eq 0 ]] || die "Failed to extract SSH payload into RestoreRamDisk."
+        if [[ "$iOS_Vers" -gt 7 ]]; then
+            echo "iOS 8 or later detected, patching restored_external..."
+            run_checked "Back up restored_external" \
+                cp ramdisk_mountpoint/usr/local/bin/restored_external ramdisk_mountpoint/usr/local/bin/restored_external.real
         fi
-        # Try to stop auto-reboot after around 5 minutes
-        
-        
-        mv ramdisk_mountpoint/sbin/reboot ramdisk_mountpoint/sbin/reboot_bak
-        mv ramdisk_mountpoint/sbin/halt ramdisk_mountpoint/sbin/halt_bak
-        
+
+        run_checked "Disable ramdisk reboot command" \
+            mv ramdisk_mountpoint/sbin/reboot ramdisk_mountpoint/sbin/reboot_bak
+        run_checked "Disable ramdisk halt command" \
+            mv ramdisk_mountpoint/sbin/halt ramdisk_mountpoint/sbin/halt_bak
         rm -f ramdisk_mountpoint/usr/local/bin/restored_external.real
-        cp ../../../resources/restored_external ramdisk_mountpoint/usr/local/bin/restored_external.sshrd
-        chmod +x ramdisk_mountpoint/usr/local/bin/restored_external.sshrd
-        cp ../../../resources/bruteforce ramdisk_mountpoint/usr/bin/
-        cp ../../../resources/device_infos ramdisk_mountpoint/usr/bin/
-        chmod +x ramdisk_mountpoint/usr/bin/bruteforce
-        chmod +x ramdisk_mountpoint/usr/bin/device_infos
+        run_checked "Install restored_external payload" \
+            cp ../../../resources/restored_external ramdisk_mountpoint/usr/local/bin/restored_external.sshrd
+        run_checked "Install bruteforce payload" \
+            cp ../../../resources/bruteforce ramdisk_mountpoint/usr/bin/
+        run_checked "Install device information payload" \
+            cp ../../../resources/device_infos ramdisk_mountpoint/usr/bin/
+        run_checked "Install setup payload" \
+            cp ../../../resources/setup.sh ramdisk_mountpoint/usr/local/bin/restored_external
+        if [[ "$device" == "iPad1,1" ]]; then
+            printf '%s\n' "iPad1,1" > ramdisk_mountpoint/iwannabrute.profile ||
+                die "Failed to write the iPad1,1 ramdisk profile marker."
+            run_checked "Install iPad1,1 rc.boot" \
+                cp ../../../resources/rc.boot.ipad ramdisk_mountpoint/private/etc/rc.boot
+            chmod +x ramdisk_mountpoint/private/etc/rc.boot ||
+                die "Failed to make iPad1,1 rc.boot executable."
+            rm -f ramdisk_mountpoint/iwannabrute.delay
+        fi
+        run_checked "Set ramdisk payload permissions" \
+            chmod +x \
+                ramdisk_mountpoint/usr/local/bin/restored_external \
+                ramdisk_mountpoint/usr/local/bin/restored_external.sshrd \
+                ramdisk_mountpoint/usr/bin/bruteforce \
+                ramdisk_mountpoint/usr/bin/device_infos
 
-        cp ../../../resources/setup.sh ramdisk_mountpoint/usr/local/bin/restored_external && chmod +x ramdisk_mountpoint/usr/local/bin/restored_external
+        run_checked "Detach RestoreRamDisk image" hdiutil detach ramdisk_mountpoint
+        active_mountpoint=""
+        run_checked "Repack RestoreRamDisk image" \
+            ../../../bin/Darwin/xpwntool RestoreRamDisk.raw.dmg ramdisk.dmg -t RestoreRamDisk.dec.img3
+        require_file ramdisk.dmg
+        mv -v ramdisk.dmg ../ || die "Failed to cache ramdisk.dmg."
 
+        run_checked "Extract iBSS" ../../../bin/Darwin/xpwntool iBSS.dec.img3 iBSS.raw
+        run_checked "Patch pwned iBSS" ../../../bin/Darwin/iBoot32Patcher iBSS.raw iBSS.patched -r
+        require_file iBSS.patched
+        cp iBSS.patched ../pwnediBSS || die "Failed to cache pwnediBSS."
+        run_checked "Repack iBSS" ../../../bin/Darwin/xpwntool iBSS.patched iBSS -t iBSS.dec.img3
+        require_file iBSS
+        mv -v iBSS ../ || die "Failed to cache iBSS."
 
-        hdiutil detach ramdisk_mountpoint
-        ../../../bin/Darwin/xpwntool RestoreRamDisk.raw.dmg ramdisk.dmg -t RestoreRamDisk.dec.img3
-        mv -v ramdisk.dmg ../
-        ../../../bin/Darwin/xpwntool iBSS.dec.img3 iBSS.raw
-        ../../../bin/Darwin/iBoot32Patcher iBSS.raw iBSS.patched -r
-        cp iBSS.patched ../pwnediBSS
-        ../../../bin/Darwin/xpwntool iBSS.patched iBSS -t iBSS.dec.img3
-        mv -v iBSS ../
-        ../../../bin/Darwin/xpwntool iBEC.dec.img3 iBEC.raw
-        ../../../bin/Darwin/iBoot32Patcher iBEC.raw iBEC.patched -r -d -b "rd=md0 $bootargs"
-        ../../../bin/Darwin/iBoot32Patcher iBEC.raw iBEC_boot.patched -r -d -b "$bootargs"
-        ../../../bin/Darwin/xpwntool iBEC.patched iBEC -t iBEC.dec.img3
-        ../../../bin/Darwin/xpwntool iBEC_boot.patched iBEC_boot -t iBEC.dec.img3
-        mv -v iBEC ../
-        mv -v iBEC_boot ../
-        mv -v applelogo.dec.img3 ../applelogo
-        mv -v DeviceTree.dec.img3 ../devicetree
-        mv -v kernelcache.dec.img3 ../kernelcache
+        run_checked "Extract iBEC" ../../../bin/Darwin/xpwntool iBEC.dec.img3 iBEC.raw
+        run_checked "Patch ramdisk iBEC" \
+            ../../../bin/Darwin/iBoot32Patcher iBEC.raw iBEC.patched -r -d -b "rd=md0 $bootargs"
+        run_checked "Patch boot iBEC" \
+            ../../../bin/Darwin/iBoot32Patcher iBEC.raw iBEC_boot.patched -r -d -b "$bootargs"
+        run_checked "Repack ramdisk iBEC" \
+            ../../../bin/Darwin/xpwntool iBEC.patched iBEC -t iBEC.dec.img3
+        run_checked "Repack boot iBEC" \
+            ../../../bin/Darwin/xpwntool iBEC_boot.patched iBEC_boot -t iBEC.dec.img3
+        require_file iBEC
+        require_file iBEC_boot
+        mv -v iBEC ../ || die "Failed to cache iBEC."
+        mv -v iBEC_boot ../ || die "Failed to cache iBEC_boot."
+        mv -v applelogo.dec.img3 ../applelogo || die "Failed to cache applelogo."
+        mv -v DeviceTree.dec.img3 ../devicetree || die "Failed to cache devicetree."
+        mv -v kernelcache.dec.img3 ../kernelcache || die "Failed to cache kernelcache."
         cd ..
         rm -rf work
 
         echo "Patching kernel..."
-
-        ../../bin/Darwin/aespatched kernelcache kernelcache.dec
-
-        mv kernelcache kernelcache.orig
-
-        ../../bin/Darwin/xpwntool kernelcache.dec kernelcache -t kernelcache.orig
-
+        if [[ "$device" == "iPad1,1" ]]; then
+            run_checked "Extract uncompressed iPad kernelcache" \
+                ../../bin/Darwin/xpwntool kernelcache kernelcache.raw
+            run_checked "Apply iOS 5 A4 AES kernel patch" \
+                "$temporary_aespatcher" ios5 kernelcache.raw kernelcache.dec
+        else
+            run_checked "Apply A4 AES kernel patch" \
+                ../../bin/Darwin/aespatched kernelcache kernelcache.dec
+        fi
+        require_file kernelcache.dec
+        mv kernelcache kernelcache.orig || die "Failed to preserve the original kernelcache."
+        run_checked "Repack patched kernelcache" \
+            ../../bin/Darwin/xpwntool kernelcache.dec kernelcache -t kernelcache.orig
+        require_file kernelcache
         cd ../../
     fi
+    echo "[OK] Ramdisk build completed for $device $version."
 }
 
 install_depends() {
@@ -287,7 +407,6 @@ set_tool_paths() {
     ideviceinstaller+="$dir/ideviceinstaller"
     idevicerestore+="$dir/idevicerestore"
     ifuse="$(command -v ifuse)"
-    ipwnder+="$dir/ipwnder"
     irecovery+="$dir/irecovery"
     irecovery2+="$dir/irecovery2"
     irecovery3+="../$dir/irecovery"
@@ -304,50 +423,82 @@ set_tool_paths() {
 
 }
 
-
 check_ramdisk_cache(){
     ramdisk_path="ramdisks/bruteforce-$deviceid-$ios_version"
+    local required_cache_files="iBSS iBEC iBEC_boot pwnediBSS applelogo devicetree kernelcache ramdisk.dmg version"
+    local cache_file
+    local cache_valid=true
 
     if [ -d "$ramdisk_path" ]; then
         echo "Ramdisk exists, checking ramdisk integrity..."
-        if [ -f "$ramdisk_path/iBSS" ] && [ -f "$ramdisk_path/iBEC" ] && [ -f "$ramdisk_path/pwnediBSS" ] && [ -f "$ramdisk_path/kernelcache" ] && [ -f "$ramdisk_path/ramdisk.dmg" ] && [ -f "$ramdisk_path/version" ] && [ -f "$ramdisk_path/pwnediBSS" ]; then
+        for cache_file in $required_cache_files; do
+            if [[ ! -s "$ramdisk_path/$cache_file" ]]; then
+                echo "[WARN] Ramdisk cache is missing $cache_file."
+                cache_valid=false
+            fi
+        done
+        if [[ "$cache_valid" == "true" ]]; then
             echo "Ramdisk is alright, checking version..."
-            local ramdisk_version=$(cat "$ramdisk_path/version")
-            if [[ "$ramdisk_version" == "$script_version" ]]; then
+            local ramdisk_version
+            ramdisk_version=$(cat "$ramdisk_path/version")
+            if [[ "$ramdisk_version" == "$ramdisk_cache_version" ]]; then
                 echo "Ramdisk is up to date. Continuing..."
+                return
             else
-                echo "Ramdisk is outdated, creating new one."
-                mk_bruteforce_ramdisk $deviceid $ios_version
+                echo "Ramdisk is outdated."
             fi
         else
-        echo "Ramdisk is broken, creating new one."
-        mk_bruteforce_ramdisk $deviceid $ios_version
+            echo "Ramdisk is incomplete."
         fi
     else
-        echo "Ramdisk does not exists. Creating new one..."
-        mk_bruteforce_ramdisk $deviceid $ios_version
+        echo "Ramdisk does not exist."
     fi
+
+    echo "Creating a clean ramdisk cache..."
+    rm -rf "$ramdisk_path" || die "Unable to remove the incomplete ramdisk cache."
+    mk_bruteforce_ramdisk "$deviceid" "$ios_version"
+
+    for cache_file in $required_cache_files; do
+        require_file "$ramdisk_path/$cache_file"
+    done
+    echo "[OK] Ramdisk cache is complete."
+}
+
+device_is_pwnd() {
+    "$project_root/bin/Darwin/irecovery" -q 2>&1 | grep -q "PWND"
+}
+
+wait_for_pwnd() {
+    local attempts="${1:-10}"
+    local attempt
+    for ((attempt=1; attempt<=attempts; attempt++)); do
+        if device_is_pwnd; then
+            echo "[OK] Verified PWND state."
+            return 0
+        fi
+        echo "[WAIT] PWND verification $attempt/$attempts"
+        sleep 1
+    done
+    return 1
 }
 
 pwn_device() {
-
     if [ "$is_fake_device" = true ]; then
-        echo "device is fake, exiting"
-        exit
+        die "Cannot pwn a fake device."
     fi
 
-    if [[ -z "${is_a5+x}" ]]; then
-        echo "Detected $device_name ($deviceid)."
-        if (system_profiler SPUSBDataType 2> /dev/null | grep ' Apple Mobile Device (DFU Mode)' >> /dev/null | bin/Darwin/irecovery -q 2> /dev/null | grep 'PWND' >> /dev/null); then
-            echo "Device already in pwnDFU. Continuing..."
-            ipwndfu send_ibss
+    if device_is_pwnd; then
+        echo "Device already in pwnDFU mode."
+        if [[ "$is_a4" == "true" ]]; then
+            echo "[OK] Skipping all exploit tools for already-pwned A4 device."
         else
-            case $pwnder in
-                "ipwndfu") ipwndfu pwn ;;
-            esac
+            ipwndfu send_ibss
         fi
+        return
+    fi
 
-    else
+    case $pwnder in
+    a5)
         echo ""
         echo ""
         echo "Detected A5 device."
@@ -355,18 +506,30 @@ pwn_device() {
         echo "Use LukeZGD fork of checkm8-a5: https://github.com/LukeZGD/checkm8-a5"
         echo "You may also use checkm8-a5 for the Pi Pico: https://www.reddit.com/r/LegacyJailbreak/comments/1djuprf/working_checkm8a5_on_the_raspberry_pi_pico/"
         echo "Pwn device using checkm8-a5 and then connect it."
-        if ! (system_profiler SPUSBDataType 2> /dev/null | grep ' Apple Mobile Device (DFU Mode)' >> /dev/null | bin/Darwin/irecovery -q 2> /dev/null | grep 'PWND' >> /dev/null); then
+        if ! device_is_pwnd; then
             echo "[*] Waiting for device in pwnDFU mode"
         fi
     
-        while ! (system_profiler SPUSBDataType 2> /dev/null | grep ' Apple Mobile Device (DFU Mode)' >> /dev/null | bin/Darwin/irecovery -q 2> /dev/null | grep 'PWND' >> /dev/null ); do
+        while ! device_is_pwnd; do
             sleep 1
         done
 
         echo "Device in pwnDFU mode detected!"
         ipwndfu send_ibss
-    fi
-
+        ;;
+    ipwndfu)
+        echo "Using ipwndfu for pwning..."
+        ipwndfu pwn
+        ;;
+    ipwnder|ipwnder32)
+        echo "Using ipwnder for pwning..."
+        run_ipwnder
+        wait_for_pwnd 15 || die "ipwnder completed but the device never reported a verified PWND state."
+        ;;
+    *)
+        die "No pwnDFU method is configured for $deviceid."
+        ;;
+    esac
 }
 
 ipwndfu() {
@@ -490,6 +653,11 @@ ipwndfu() {
 
 }
 
+run_ipwnder() {
+    echo "Pwning device using ipwnder"
+    run_checked "Run ipwnder" ./bin/Darwin/ipwnder
+}
+
 download_file() {
     # usage: download_file {link} {target location} {sha1}
     local filename="$(basename $2)"
@@ -510,10 +678,15 @@ download_file() {
 
 get_device_info() {
     fake_deviceid=""
+    build_only=false
+    ramdisk_cache_version="2.0-a4.16"
     for arg in "$@"; do
         case $arg in
             fake-deviceid=*)
                 fake_deviceid="${arg#*=}"
+                ;;
+            build-only)
+                build_only=true
                 ;;
         esac
     done
@@ -531,76 +704,88 @@ get_device_info() {
         done
 
         deviceid=$(bin/Darwin/irecovery -q | grep PRODUCT | sed 's/PRODUCT: //')
+        [[ -n "$deviceid" ]] || die "irecovery did not report a device product identifier."
     fi
     case $deviceid in
-  #      "iPhone3,1") device_name="iPhone 4 (GSM)" pwnder="ipwnder32" ;;
-  #      "iPhone3,2") device_name="iPhone 4 (GSM, Rev A)" pwnder="ipwnder32" ;;
-  #      "iPhone3,3") device_name="iPhone 4 (CDMA)" pwnder="ipwnder32";;
-        "iPhone4,1") device_name="iPhone 4S" is_a5=true;;
-        "iPhone5,1") device_name="iPhone 5 (GSM)" pwnder="ipwndfu";;
-        "iPhone5,2") device_name="iPhone 5 (Global)" pwnder="ipwndfu";;
-        "iPhone5,3") device_name="iPhone 5C (GSM)" pwnder="ipwndfu";;
-        "iPhone5,4") device_name="iPhone 5C (Global)" pwnder="ipwndfu";;
-  #      "iPad1,1") device_name="iPad 1" pwnder="ipwnder32";;
-        "iPad2,1") device_name="iPad 2 (Wi-Fi)" is_a5=true;;
-        "iPad2,2") device_name="iPad 2 (GSM)" is_a5=true;;
-        "iPad2,3") device_name="iPad 2 (CDMA)" is_a5=true;;
-        "iPad2,4") device_name="iPad 2 (Wi-Fi, Rev A)" is_a5=true;;
-        "iPad2,5") device_name="iPad mini 1 (Wi-Fi)" is_a5=true;;
-        "iPad2,6") device_name="iPad mini 1 (GSM)" is_a5=true;;
-        "iPad2,7") device_name="iPad mini 1 (Global)" is_a5=true;;
-        "iPad3,1") device_name="iPad 3 (Wi-Fi)" is_a5=true;;
-        "iPad3,2") device_name="iPad 3 (CDMA)" is_a5=true;;
-        "iPad3,3") device_name="iPad 3 (GSM)" is_a5=true;;
-        "iPad3,4") device_name="iPad 4 (Wi-Fi)" pwnder="ipwndfu";;
-        "iPad3,5") device_name="iPad 4 (GSM)" pwnder="ipwndfu";;
-        "iPad3,6") device_name="iPad 4 (Global)" pwnder="ipwndfu";;
-        "iPod4,1") device_name="iPod touch 4" is_a5=true;;
-        "iPod5,1") device_name="iPod touch 5" is_a5=true;;
+        "iPhone3,2") device_name="iPhone 4 (GSM, Rev A)" default_version="7.1.2" pwnder="ipwnder32" is_a4=true ;;
+        "iPhone4,1") device_name="iPhone 4S" default_version="9.0.2" pwnder="a5";;
+        "iPhone5,1") device_name="iPhone 5 (GSM)" default_version="9.0.2" pwnder="ipwndfu";;
+        "iPhone5,2") device_name="iPhone 5 (Global)" default_version="9.0.2" pwnder="ipwndfu";;
+        "iPhone5,3") device_name="iPhone 5C (GSM)" default_version="9.0.2" pwnder="ipwndfu";;
+        "iPhone5,4") device_name="iPhone 5C (Global)" default_version="9.0.2" pwnder="ipwndfu";;
+        "iPad1,1") device_name="iPad 1" default_version="5.1.1" pwnder="ipwnder32" is_a4=true ramdisk_cache_version="2.0-a4.16" ;;
+        "iPad2,1") device_name="iPad 2 (Wi-Fi)" default_version="9.0.2" pwnder="a5";;
+        "iPad2,2") device_name="iPad 2 (GSM)" default_version="9.0.2" pwnder="a5";;
+        "iPad2,3") device_name="iPad 2 (CDMA)" default_version="9.0.2" pwnder="a5";;
+        "iPad2,4") device_name="iPad 2 (Wi-Fi, Rev A)" default_version="9.0.2" pwnder="a5";;
+        "iPad2,5") device_name="iPad mini 1 (Wi-Fi)" default_version="9.0.2" pwnder="a5";;
+        "iPad2,6") device_name="iPad mini 1 (GSM)" default_version="9.0.2" pwnder="a5";;
+        "iPad2,7") device_name="iPad mini 1 (Global)" default_version="9.0.2" pwnder="a5";;
+        "iPad3,1") device_name="iPad 3 (Wi-Fi)" default_version="9.0.2" pwnder="a5";;
+        "iPad3,2") device_name="iPad 3 (CDMA)" default_version="9.0.2" pwnder="a5";;
+        "iPad3,3") device_name="iPad 3 (GSM)" default_version="9.0.2" pwnder="a5";;
+        "iPad3,4") device_name="iPad 4 (Wi-Fi)" default_version="9.0.2" pwnder="ipwndfu";;
+        "iPad3,5") device_name="iPad 4 (GSM)" default_version="9.0.2" pwnder="ipwndfu";;
+        "iPad3,6") device_name="iPad 4 (Global)" default_version="9.0.2" pwnder="ipwndfu";;
+        "iPod4,1") device_name="iPod touch 4" default_version="6.1.6" pwnder="ipwnder32" is_a4=true ;;
+        "iPod5,1") device_name="iPod touch 5" default_version="9.0.2" pwnder="a5";;
         *) device_name="Unsupported device" unsupported=true;;
     esac
     if [[ -z "${unsupported+x}" ]]; then
         echo "Detected $device_name ($deviceid)."
     else
-        echo "$deviceid is unsupported, connect supported device and try again"
-        exit
+        die "$deviceid is unsupported; connect a supported device and try again."
     fi
     
 }
 
+irecovery_retry() {
+    local description="$1"
+    shift
+    local attempt status
+    for attempt in 1 2 3; do
+        echo "[RUN] $description (attempt $attempt/3)"
+        "$project_root/bin/Darwin/irecovery" "$@"
+        status=$?
+        if [[ $status -eq 0 ]]; then
+            echo "[OK] $description"
+            return 0
+        fi
+        echo "[WARN] $description failed with exit status $status."
+        sleep 2
+    done
+    die "$description failed after 3 attempts."
+}
+
 send_ramdisk() {
     echo "Booting ramdisk..."
-    cd ramdisks/bruteforce-$deviceid-$ios_version
-    sleep 3
-    echo "Sending iBSS..."
-    ../../bin/Darwin/irecovery -f iBSS
-
-    sleep 1
-    echo "Sending iBEC..."
-    ../../bin/Darwin/irecovery -f iBEC
+    cd "ramdisks/bruteforce-$deviceid-$ios_version" ||
+        die "Unable to enter the ramdisk cache directory."
+    local boot_asset
+    for boot_asset in iBSS iBEC devicetree ramdisk.dmg kernelcache; do
+        require_file "$boot_asset"
+    done
 
     sleep 3
-
-    ../../bin/Darwin/irecovery -c "bgcolor 0 255 255"
-
-    sleep 1
-
-    echo "Sending device tree..."
-    ../../bin/Darwin/irecovery -f devicetree
-    ../../bin/Darwin/irecovery -c devicetree
+    irecovery_retry "Upload iBSS" -f iBSS
 
     sleep 1
+    irecovery_retry "Upload iBEC" -f iBEC
 
-    echo "Sending ramdisk..."
-    ../../bin/Darwin/irecovery -f ramdisk.dmg
-    ../../bin/Darwin/irecovery -c ramdisk
+    sleep 3
+    irecovery_retry "Set diagnostic screen color" -c "bgcolor 0 255 255"
 
     sleep 1
+    irecovery_retry "Upload device tree" -f devicetree
+    irecovery_retry "Activate device tree" -c devicetree
 
-    echo "Sending kernelcache..."
-    ../../bin/Darwin/irecovery -f kernelcache
-    echo "Booting device now..."
-    ../../bin/Darwin/irecovery -c bootx
+    sleep 1
+    irecovery_retry "Upload ramdisk" -f ramdisk.dmg
+    irecovery_retry "Activate ramdisk" -c ramdisk
+
+    sleep 1
+    irecovery_retry "Upload kernelcache" -f kernelcache
+    irecovery_retry "Boot device" -c bootx
     echo ""
     echo "Device should show text on screen now."
     echo "After passcode is found please reboot using home + power button."
@@ -735,12 +920,11 @@ echo ""
 
 
 if [[ $EUID == 0 && $run_as_root != 1 ]]; then
-    echo "Running the script as root is not allowed."
-    fi
+    die "Running the script as root is not allowed."
+fi
 
 if [[ ! -d "./resources" ]]; then
-    echo "The resources folder cannot be found. Replace resources folder and try again." \
-        "* If resources folder is present try removing spaces from path/folder name"
+    die "The resources folder cannot be found. Replace it and try again. If it is present, remove spaces from the project path."
 fi
 
 set_tool_paths
@@ -757,7 +941,7 @@ if [[ $no_internet_check != 1 ]]; then
         fi
     done
     if [[ $check != 0 ]]; then
-        echo "Please check your Internet connection before proceeding."
+        die "Please check your Internet connection before proceeding."
     fi
 fi
 
@@ -779,7 +963,7 @@ if [[ ! -e "./resources/firstrun" || $(cat "./resources/firstrun") != "$platform
 fi
 get_device_info "$@"
 echo ""
-echo "Enter ramdisk version (9.0.2 is default)"
+echo "Enter ramdisk version ($default_version is default)"
 echo ""
 read -p "Version:" ios_version
 major="${ios_version%%.*}"
@@ -787,13 +971,22 @@ if [ "$major" = "10" ]; then
     echo "For iOS 10.x devices use 9.0.2 ramdisk."
     exit
 fi
-ios_version=${ios_version:-9.0.2}
+ios_version="${ios_version:-$default_version}"
+
+if [[ "$is_a4" == "true" ]]; then
+    preflight_a4
+fi
 
 echo ""
 echo "Checking is Ramdisk exists."
 echo ""
 
 check_ramdisk_cache
+
+if [[ "$build_only" == "true" ]]; then
+    echo "[OK] Build-only validation completed for $deviceid $ios_version."
+    return
+fi
 
 #mk_bruteforce_ramdisk $deviceid $ios_version
 
@@ -807,8 +1000,11 @@ pwn_device
 send_ramdisk
 
 }
-othertmp=$(ls "$(dirname "$0")" | grep -c tmp)
-
-pushd "$(dirname "${BASH_SOURCE[0]}")" > /dev/null
-
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    othertmp=$(ls "$(dirname "$0")" | grep -c tmp)
+    pushd "$(dirname "${BASH_SOURCE[0]}")" > /dev/null
+    project_root="$(pwd)"
+    trap cleanup_build_mount EXIT
+    init_diagnostic_log
+    main "$@"
+fi
