@@ -11,7 +11,7 @@ Bruteforce A4-A6 numeric password with ease.
 
 # Compatible devices
 
-Physically verified A4 pairs:
+Use the **A4** branch for all verified A4 devices:
 
 | Device | Identifier | iOS |
 | ------------ | ------------ | ------------ |
@@ -19,7 +19,7 @@ Physically verified A4 pairs:
 | iPod touch 4 | iPod4,1 | 6.1.6 |
 | iPad 1 | iPad1,1 | 5.1.1 |
 
-A5–A6 devices continue to use the original ramdisk path.
+A5–A6 devices continue to use the original ramdisk path on `2.0` / `main`.
 
 # Usage
 iwannabrute needs initial setup before usage.
@@ -30,6 +30,8 @@ iwannabrute needs initial setup before usage.
 1. Clone and cd into this repository: `git clone https://github.com/platinumstufff/iwannabrute --recursive && cd iwannabrute`
 2. Place your device into DFU mode
 3. Run `./start.sh`
+
+On iPad 1, passcode checking shows only the method and range (`Bruteforcing using Keystore.` / `Checking 0000 to 9999.`), then the found passcode in large green digits. If Keystore does not find a 4-digit code, it falls back to userland derivation.
 
 # Estimated bruteforce time
 
@@ -42,8 +44,6 @@ iwannabrute needs initial setup before usage.
 8-digit |92 days |35 days
 
 The tool will use the AES engine as much as possible with no restrictions at the full speed. 80 milliseconds is a value that Apple uses to calibrate it's software to this day.
-
-iPad 1 on iOS 5.1.1 first tries the AppleKeyStore kernel service (`bruteforce -u`, 4-digit only). If that service is missing or does not produce a result, it falls back to userland (“manual”) derivation against the UID AES engine, which can continue through longer numeric passcodes. Progress lines stay on screen; individual guess digits are not printed.
 
 # Soon™
 

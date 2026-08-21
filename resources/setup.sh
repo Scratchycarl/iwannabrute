@@ -6,7 +6,18 @@ emit_phase() {
     local state="$2"
     local status="${3:--}"
     local message="[IWANNABRUTE] PHASE=$phase STATE=$state EXIT=$status"
-    echo "$message" > /dev/console
+    case "$phase-$state" in
+        AES_ACCESS-*|BRUTEFORCE-*|BRUTEFORCE_METHOD-*|PERSIST_PHASE_LOG-*|CLEAR_DISABLED_STATE-*)
+            if [[ "$state" != "FATAL" ]]; then
+                :
+            else
+                echo "$message" > /dev/console
+            fi
+            ;;
+        *)
+            echo "$message" > /dev/console
+            ;;
+    esac
     if [[ -n "$phase_log" ]]; then
         echo "$message" >> "$phase_log"
     fi
@@ -67,9 +78,8 @@ wait_for_data_device() {
             ls -l /dev/disk* > /dev/console 2>&1
             return 0
         fi
-        if (( attempt == 1 || attempt % 10 == 0 )); then
+        if (( attempt == 1 || attempt % 30 == 0 )); then
             echo "Waiting for data partition (${attempt}s)..." > /dev/console
-            ls -l /dev/disk* > /dev/console 2>&1
         fi
         delay_seconds 1
     done
@@ -116,47 +126,83 @@ mount_and_verify_data() {
     return 1
 }
 
-filter_bruteforce_console() {
-    # Hide the raw per-guess digits while keeping status, ETA, and result lines.
-    local line
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        case "$line" in
-            ''|[0-9]|[0-9][0-9]|[0-9][0-9][0-9]|[0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9])
-                continue
-                ;;
-        esac
-        echo "$line" > /dev/console
+print_big_passcode() {
+    local code="$1" ch row col bits i out
+    echo > /dev/console
+    for row in 0 1 2 3 4; do
+        out=""
+        i=0
+        while [[ $i -lt ${#code} ]]; do
+            ch="${code:$i:1}"
+            case "$ch" in
+                0) bits="0111010001100011000101110" ;;
+                1) bits="0010001100001000010001110" ;;
+                2) bits="0111010001000100010001111" ;;
+                3) bits="0111010001001101000101110" ;;
+                4) bits="0001000110010101111100010" ;;
+                5) bits="1111100000111100000101110" ;;
+                6) bits="0111010000111101000101110" ;;
+                7) bits="1111100010001000100001000" ;;
+                8) bits="0111010001011101000101110" ;;
+                9) bits="0111010001011110000101110" ;;
+                *) bits="0000000000000000000000000" ;;
+            esac
+            col=0
+            while [[ $col -lt 5 ]]; do
+                if [[ "${bits:$((row * 5 + col)):1}" == "1" ]]; then
+                    out="${out}"$'\033[42m \033[0m'
+                else
+                    out="${out} "
+                fi
+                col=$((col + 1))
+            done
+            out="${out}  "
+            i=$((i + 1))
+        done
+        printf '%s\n' "$out" > /dev/console
     done
+    echo > /dev/console
 }
 
-run_bruteforce() {
-    /usr/bin/bruteforce "$@" 2>&1 | filter_bruteforce_console
-    return "${PIPESTATUS[0]}"
+passcode_from_log() {
+    local line passcode=""
+    while IFS= read -r line; do
+        case "$line" in
+            "Found passcode :"*)
+                passcode="${line#Found passcode :}"
+                passcode="${passcode# }"
+                ;;
+            "Finished:"*)
+                passcode="${line#Finished:}"
+                passcode="${passcode# }"
+                ;;
+        esac
+    done < "$1"
+    printf '%s\n' "$passcode"
 }
 
 run_ipad_bruteforce() {
-    local sentinel found=0 f
+    local log passcode
     if [[ -d /mnt1/private/etc ]]; then
-        sentinel="/mnt1/private/etc/iwannabrute-keystore-started"
+        log="/mnt1/private/etc/iwannabrute-bruteforce.log"
     else
-        sentinel="/mnt2/iwannabrute-keystore-started"
+        log="/mnt2/iwannabrute-bruteforce.log"
     fi
-    : > "$sentinel"
 
-    echo "Trying AppleKeyStore kernel service." > /dev/console
+    echo "Bruteforcing using Keystore." > /dev/console
+    echo "Checking 0000 to 9999." > /dev/console
     emit_phase BRUTEFORCE_METHOD KEYSTORE
-    run_bruteforce -u -n
-    for f in /mnt1/private/etc/*.plist; do
-        if [[ -f "$f" && "$f" -nt "$sentinel" ]]; then
-            found=1
-        fi
-    done
-    if [[ "$found" -eq 1 ]]; then
+    /usr/bin/bruteforce -u -n > "$log" 2>&1
+    passcode="$(passcode_from_log "$log")"
+    if [[ -n "$passcode" ]]; then
+        echo "Found passcode : $passcode" > /dev/console
+        print_big_passcode "$passcode"
         return 0
     fi
-    echo "AppleKeyStore did not write a new result; falling back to userland derivation." > /dev/console
+
+    echo "Keystore did not find a 4-digit passcode; using manual derivation." > /dev/console
     emit_phase BRUTEFORCE_METHOD USERLAND_FALLBACK
-    run_bruteforce -n
+    /usr/bin/bruteforce -n >> /dev/console 2>&1
 }
 
 start_usb_ssh() {
@@ -251,7 +297,7 @@ emit_phase BRUTEFORCE START
 if [[ "$device_profile" == "iPad1,1" ]]; then
     run_ipad_bruteforce
 else
-    run_bruteforce
+    /usr/bin/bruteforce >> /dev/console 2>&1
 fi
 bruteforce_status=$?
 emit_phase BRUTEFORCE EXIT "$bruteforce_status"
