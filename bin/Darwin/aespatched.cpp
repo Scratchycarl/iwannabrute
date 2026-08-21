@@ -205,6 +205,66 @@ static bool applyUniquePatch(std::vector<uint8_t>& data,
     return true;
 }
 
+static bool isMachO(const std::vector<uint8_t>& data, size_t offset = 0) {
+    return data.size() >= offset + 4 &&
+           data[offset] == 0xce && data[offset + 1] == 0xfa &&
+           data[offset + 2] == 0xed && data[offset + 3] == 0xfe;
+}
+
+static bool decompressLzss(const std::vector<uint8_t>& compressed,
+                           std::vector<uint8_t>* decompressed) {
+    decompressed->assign(20 * 1024 * 1024, 0);
+    LzssDecompressor decompressor;
+    uint32_t destination_used = 0;
+    uint32_t source_used = 0;
+    decompressor.decompress(decompressed->data(),
+                            static_cast<uint32_t>(decompressed->size()),
+                            &destination_used,
+                            const_cast<uint8_t*>(compressed.data()),
+                            static_cast<uint32_t>(compressed.size()),
+                            &source_used);
+    uint32_t flushed = 0;
+    decompressor.flush(decompressed->data() + destination_used,
+                       static_cast<uint32_t>(decompressed->size() - destination_used),
+                       &flushed);
+    decompressed->resize(destination_used + flushed);
+    return isMachO(*decompressed);
+}
+
+static bool loadKernelMachO(const std::vector<uint8_t>& input,
+                            std::vector<uint8_t>* macho) {
+    if (isMachO(input)) {
+        std::cout << "Input is already an uncompressed Mach-O (" << std::dec
+                  << input.size() << " bytes).\n";
+        *macho = input;
+        return true;
+    }
+
+    const char* lzss_magic = "complzss";
+    const std::vector<uint8_t>::const_iterator packed =
+        std::search(input.begin(), input.end(), lzss_magic, lzss_magic + 8);
+    if (packed != input.end()) {
+        const size_t header_offset = static_cast<size_t>(packed - input.begin());
+        const size_t payload_offset = header_offset + 0x180;
+        if (payload_offset < input.size()) {
+            std::cout << "Found complzss header at 0x" << std::hex << header_offset
+                      << ", decompressing from 0x" << payload_offset << ".\n";
+            std::vector<uint8_t> compressed(input.begin() +
+                                                static_cast<std::ptrdiff_t>(payload_offset),
+                                            input.end());
+            if (decompressLzss(compressed, macho)) {
+                std::cout << "Decompressed Mach-O is " << std::dec << macho->size()
+                          << " bytes.\n";
+                return true;
+            }
+        }
+    }
+
+    std::cerr << "Input is not an uncompressed Mach-O and LZSS decompression did "
+                 "not produce a Mach-O.\n";
+    return false;
+}
+
 static bool runSelfTest() {
     const std::vector<std::string> profile_names = {"ios5", "ios6-7"};
     for (const std::string& name : profile_names) {
@@ -233,6 +293,16 @@ static bool runSelfTest() {
             return false;
         }
     }
+    std::vector<uint8_t> already_macho(64, 0x11);
+    already_macho[0] = 0xce;
+    already_macho[1] = 0xfa;
+    already_macho[2] = 0xed;
+    already_macho[3] = 0xfe;
+    std::vector<uint8_t> loaded;
+    if (!loadKernelMachO(already_macho, &loaded) || loaded != already_macho) {
+        std::cerr << "Uncompressed Mach-O passthrough failed.\n";
+        return false;
+    }
     std::cout << "aespatched self-test passed.\n";
     return true;
 }
@@ -260,45 +330,20 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> input((std::istreambuf_iterator<char>(input_stream)), {});
     input_stream.close();
 
-    const std::vector<uint8_t> macho_magic = {0xce, 0xfa, 0xed, 0xfe};
-    const std::vector<uint8_t>::iterator macho =
-        std::search(input.begin(), input.end(), macho_magic.begin(), macho_magic.end());
-    if (macho == input.end() || macho == input.begin()) {
-        std::cerr << "Mach-O signature not found in compressed kernelcache.\n";
-        return 1;
-    }
-
-    const size_t lzss_offset = static_cast<size_t>(macho - input.begin()) - 1;
-    std::cout << "Profile " << profile.name << ": found Mach-O marker at 0x" << std::hex
-              << (lzss_offset + 1) << ", decompressing from 0x" << lzss_offset << ".\n";
-
-    std::vector<uint8_t> compressed(input.begin() + static_cast<std::ptrdiff_t>(lzss_offset),
-                                    input.end());
-    std::vector<uint8_t> decompressed(20 * 1024 * 1024);
-    LzssDecompressor decompressor;
-    uint32_t destination_used = 0;
-    uint32_t source_used = 0;
-    decompressor.decompress(decompressed.data(),
-                            static_cast<uint32_t>(decompressed.size()),
-                            &destination_used,
-                            compressed.data(),
-                            static_cast<uint32_t>(compressed.size()),
-                            &source_used);
-    uint32_t flushed = 0;
-    decompressor.flush(decompressed.data() + destination_used,
-                       static_cast<uint32_t>(decompressed.size() - destination_used),
-                       &flushed);
-    decompressed.resize(destination_used + flushed);
-    if (decompressed.size() < 4) {
-        std::cerr << "Kernelcache decompression produced no usable output.\n";
+    std::vector<uint8_t> macho;
+    if (!loadKernelMachO(input, &macho)) {
         return 1;
     }
 
     size_t patched_offset = 0;
-    if (!applyUniquePatch(decompressed, profile, &patched_offset)) {
+    if (!applyUniquePatch(macho, profile, &patched_offset)) {
         return 1;
     }
-    std::cout << "Patched " << profile.name << " IOAESAccelerator at offset 0x" << std::hex
+    if (!isMachO(macho)) {
+        std::cerr << "Patched output is no longer a Mach-O.\n";
+        return 1;
+    }
+    std::cout << "Patched " << profile.name << " IOAESAccelerator at Mach-O offset 0x" << std::hex
               << patched_offset << ".\n";
 
     std::ofstream output_stream(argv[3], std::ios::binary);
@@ -306,8 +351,8 @@ int main(int argc, char** argv) {
         std::cerr << "Cannot write: " << argv[3] << "\n";
         return 1;
     }
-    output_stream.write(reinterpret_cast<const char*>(decompressed.data()),
-                        static_cast<std::streamsize>(decompressed.size()));
+    output_stream.write(reinterpret_cast<const char*>(macho.data()),
+                        static_cast<std::streamsize>(macho.size()));
     if (!output_stream) {
         std::cerr << "Failed while writing: " << argv[3] << "\n";
         return 1;
