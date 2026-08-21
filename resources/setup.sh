@@ -124,6 +124,11 @@ mount_and_verify_data() {
     return 1
 }
 
+clear_console() {
+    # Same sequence the A5-A6 bruteforce binary uses at startup.
+    printf '\033[H\033[J' > /dev/console
+}
+
 print_big_passcode() {
     local code="$1" ch row col bits i out
     echo > /dev/console
@@ -187,20 +192,23 @@ run_ipad_bruteforce() {
         log="/mnt2/iwannabrute-bruteforce.log"
     fi
 
+    # Keep AppleKeyStore IOKit errors and every PIN off the framebuffer.
+    # The -u binary prints IOConnectCallMethod on each failed unlock.
+    clear_console
     echo "Bruteforcing using Keystore." > /dev/console
     echo "Checking 0000 to 9999." > /dev/console
     emit_phase BRUTEFORCE_METHOD KEYSTORE
-    /usr/bin/bruteforce -u -n > "$log" 2>&1
+    /usr/bin/bruteforce -u -n > "$log" 2>&1 < /dev/null
     passcode="$(passcode_from_log "$log")"
     if [[ -n "$passcode" ]]; then
+        clear_console
         echo "Found passcode : $passcode" > /dev/console
         print_big_passcode "$passcode"
         return 0
     fi
 
-    echo "Keystore did not find a 4-digit passcode; using manual derivation." > /dev/console
     emit_phase BRUTEFORCE_METHOD USERLAND_FALLBACK
-    /usr/bin/bruteforce -n >> /dev/console 2>&1
+    /usr/bin/bruteforce >> /dev/console 2>&1
 }
 
 start_usb_ssh() {
