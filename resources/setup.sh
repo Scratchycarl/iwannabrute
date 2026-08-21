@@ -124,93 +124,6 @@ mount_and_verify_data() {
     return 1
 }
 
-clear_console() {
-    # Same sequence the A5-A6 bruteforce binary uses at startup.
-    printf '\033[H\033[J' > /dev/console
-}
-
-print_big_passcode() {
-    local code="$1" ch row col bits i out
-    echo > /dev/console
-    for row in 0 1 2 3 4; do
-        out=""
-        i=0
-        while [[ $i -lt ${#code} ]]; do
-            ch="${code:$i:1}"
-            case "$ch" in
-                0) bits="0111010001100011000101110" ;;
-                1) bits="0010001100001000010001110" ;;
-                2) bits="0111010001000100010001111" ;;
-                3) bits="0111010001001101000101110" ;;
-                4) bits="0001000110010101111100010" ;;
-                5) bits="1111100000111100000101110" ;;
-                6) bits="0111010000111101000101110" ;;
-                7) bits="1111100010001000100001000" ;;
-                8) bits="0111010001011101000101110" ;;
-                9) bits="0111010001011110000101110" ;;
-                *) bits="0000000000000000000000000" ;;
-            esac
-            col=0
-            while [[ $col -lt 5 ]]; do
-                if [[ "${bits:$((row * 5 + col)):1}" == "1" ]]; then
-                    out="${out}"$'\033[42m \033[0m'
-                else
-                    out="${out} "
-                fi
-                col=$((col + 1))
-            done
-            out="${out}  "
-            i=$((i + 1))
-        done
-        printf '%s\n' "$out" > /dev/console
-    done
-    echo > /dev/console
-}
-
-passcode_from_log() {
-    local line passcode=""
-    while IFS= read -r line; do
-        case "$line" in
-            "Found passcode :"*)
-                passcode="${line#Found passcode :}"
-                passcode="${passcode# }"
-                ;;
-            "Finished:"*)
-                passcode="${line#Finished:}"
-                passcode="${passcode# }"
-                ;;
-        esac
-    done < "$1"
-    printf '%s\n' "$passcode"
-}
-
-run_ipad_bruteforce() {
-    local log passcode
-    if [[ -d /mnt1/private/etc ]]; then
-        log="/mnt1/private/etc/iwannabrute-bruteforce.log"
-    else
-        log="/mnt2/iwannabrute-bruteforce.log"
-    fi
-
-    # Keep AppleKeyStore IOKit errors and every PIN off the framebuffer.
-    # The -u binary prints IOConnectCallMethod on each failed unlock.
-    clear_console
-    echo "Bruteforcing using Keystore." > /dev/console
-    echo "Checking 0000 to 9999." > /dev/console
-    emit_phase BRUTEFORCE_METHOD KEYSTORE
-    /usr/bin/bruteforce -u -n > "$log" 2>&1 < /dev/null
-    passcode="$(passcode_from_log "$log")"
-    if [[ -n "$passcode" ]]; then
-        clear_console
-        echo "Found passcode : $passcode" > /dev/console
-        print_big_passcode "$passcode"
-        return 0
-    fi
-
-    emit_phase BRUTEFORCE_METHOD USERLAND_FALLBACK
-    /usr/bin/bruteforce >> /dev/console 2>&1
-}
-
 start_usb_ssh() {
     if [[ "$device_profile" == "iPad1,1" ]]; then
         # The iOS 7 restored_external USB helper segfaults on this ramdisk.
@@ -300,11 +213,8 @@ fi
 # confirmed successful connection to IOAESAccelerator.
 emit_phase AES_ACCESS ATTEMPT
 emit_phase BRUTEFORCE START
-if [[ "$device_profile" == "iPad1,1" ]]; then
-    run_ipad_bruteforce
-else
-    /usr/bin/bruteforce >> /dev/console 2>&1
-fi
+emit_phase BRUTEFORCE_METHOD USERLAND
+/usr/bin/bruteforce >> /dev/console 2>&1
 bruteforce_status=$?
 emit_phase BRUTEFORCE EXIT "$bruteforce_status"
 emit_phase AES_ACCESS PROCESS_EXIT "$bruteforce_status"

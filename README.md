@@ -31,7 +31,7 @@ iwannabrute needs initial setup before usage.
 2. Place your device into DFU mode
 3. Run `./start.sh`
 
-On iPad 1, passcode checking shows only the method and range (`Bruteforcing using Keystore.` / `Checking 0000 to 9999.`), then the found passcode in large green digits. If Keystore does not find a 4-digit code, it falls back to userland derivation.
+On iPad 1, passcode checking uses the same userland derivation path as A5–A6 (`Bruteforcing using manual derivation`).
 
 # Estimated bruteforce time
 
